@@ -1,0 +1,79 @@
+"""Serialise the 3-D topology-optimisation run for the interactive console.
+
+Ships the RAW per-tet data rather than a pre-extracted surface, so the iso-level and the iteration
+are both live in the browser. Every field here is computed by jNO on this run.
+
+Follows pikimam/analysis/export_web.py: round hard, dump minified, inline into the HTML by regex.
+"""
+
+import json
+import os
+import re
+
+import jax
+
+jax.config.update("jax_enable_x64", True)
+
+import numpy as np  # noqa: E402
+
+import jno  # noqa: E402
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+run = np.load(os.path.join(HERE, "topo3d_run.npz"))
+cells, pts0, pts_f, rho_f = (run[k] for k in ("cells", "pts0", "pts_f", "rho_f"))
+fr_rho, fr_pts = run["frames_rho"], run["frames_pts"]
+print(f"tets={cells.shape[0]} nodes={pts0.shape[0]} frames={fr_rho.shape[0]}")
+
+# --- per-tet mesh-quality fields on the FINAL deformed mesh, through jNO's own nodes ----------
+L, H, W, h = 4.0, 2.0, 2.0, 0.30
+d = jno.Shape.box(0, 0, 0, L, H, W, size=h).domain()
+assert np.array_equal(np.asarray(d._cells_p1()), cells), "mesh differs from the run"
+d.mesh.points[:, :3] = pts_f  # evaluate the geometry nodes ON the deformed configuration
+aspect = np.asarray(d.cell_aspect().eval()).reshape(-1)
+dihed = np.degrees(np.asarray(d.cell_angles().eval()))  # (n_cells, 6)
+cvol = np.asarray(d.cell_volume().eval()).reshape(-1)
+moved = np.linalg.norm(pts_f - pts0, axis=1)
+print(f"aspect [{aspect.min():.2f},{aspect.max():.2f}]  min dihedral {dihed.min():.2f} deg  "
+      f"min |K| {cvol.min():.3e}  max node move {moved.max():.4f}")
+
+r = lambda a, n: np.round(np.asarray(a, float), n).tolist()  # noqa: E731
+
+data = {
+    "meta": {
+        "L": L, "H": H, "W": W, "h": h, "volfrac": 0.20, "penal": 3.0,
+        "nt": int(cells.shape[0]), "nn": int(pts0.shape[0]), "nf": int(fr_rho.shape[0]),
+        "iters": int(run["it"][-1]),
+        "C0": float(run["C"][0]), "C1": float(run["C"][-1]),
+        "V1": float(run["V"][-1]), "mnd": float(run["mnd"][-1]),
+        "minvol": float(cvol.min()), "mindih": float(dihed.min()), "maxaspect": float(aspect.max()),
+        "maxmove": float(moved.max()), "movebound": 0.30 * h,
+    },
+    "cells": cells.astype(int).ravel().tolist(),
+    "pts": r(pts_f.ravel(), 5),
+    "pts0": r(pts0.ravel(), 5),
+    # per-frame: node positions + densities, so the slider drives geometry AND design
+    "frames": {"rho": [r(f, 4) for f in fr_rho], "pts": [r(f.ravel(), 5) for f in fr_pts]},
+    # per-tet scalar fields on the final configuration
+    "fields": {
+        "rho": r(rho_f, 4),
+        "aspect": r(aspect, 3),
+        "dihmin": r(dihed.min(axis=1), 2),
+        "vol": r(cvol, 6),
+    },
+    "moved": r(moved, 5),
+    "hist": {k: r(run[k], 6) for k in ("it", "C", "V", "mnd", "ang", "asp")},
+}
+
+blob = json.dumps(data, separators=(",", ":"))
+out_json = os.path.join(HERE, "topo3d_web.json")
+with open(out_json, "w") as f:
+    f.write(blob)
+print(f"wrote {out_json}  ({len(blob) / 1e6:.2f} MB)")
+
+tpl = os.path.join(HERE, "topo3d_console.html")
+if os.path.exists(tpl):
+    html = open(tpl).read()
+    new, n = re.subn(r"const BUILTIN = \{.*?\};\n", "const BUILTIN = " + blob + ";\n", html, count=1, flags=re.S)
+    assert n == 1, "BUILTIN marker not found in the template"
+    open(tpl, "w").write(new)
+    print(f"inlined into {tpl}  ({len(new) / 1e6:.2f} MB)")

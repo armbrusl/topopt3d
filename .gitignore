@@ -1,0 +1,9 @@
+*.npz
+*.png
+*.gif
+*.log
+topo3d_web.json
+scripts/console.html
+_frames/
+solvenv/
+__pycache__/

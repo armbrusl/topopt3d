@@ -1,0 +1,391 @@
+<title>Topopt Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --paper:#fff; --well:#fafafa; --line:#ececee; --line2:#dcdce0;
+  --ink:#17181c; --soft:#6a6f78; --faint:#a0a5ad; --accent:#0d9488;
+  --ink-soft:#6a6f78; --ink-faint:#a0a5ad;
+  --u: clamp(12px, 0.60vw, 20px);
+}
+:root:not([data-theme="light"]){ }
+@media(prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --paper:#0f1114; --well:#15181c; --line:#24282e; --line2:#31363d;
+    --ink:#e8eaed; --soft:#9aa1ab; --faint:#6b727c; --accent:#2dd4bf;
+    --ink-soft:#9aa1ab; --ink-faint:#6b727c;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0f1114; --well:#15181c; --line:#24282e; --line2:#31363d;
+  --ink:#e8eaed; --soft:#9aa1ab; --faint:#6b727c; --accent:#2dd4bf;
+  --ink-soft:#9aa1ab; --ink-faint:#6b727c;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:var(--paper);overflow:hidden}
+body{color:var(--ink);font-family:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;
+  font-size:var(--u);line-height:1.45;-webkit-font-smoothing:antialiased}
+.app{display:grid;grid-template-columns:1fr minmax(210px,16vw);height:100vh;
+  gap:calc(var(--u)*1.1);padding:calc(var(--u)*0.9)}
+@media(max-width:820px){.app{grid-template-columns:1fr;grid-template-rows:1fr auto;overflow:auto;height:auto;min-height:100vh}
+  .viewport{height:60vh}}
+.viewport{position:relative;min-width:0;min-height:0}
+.viewport canvas{display:block;touch-action:none;background:var(--well)}
+canvas.stage{position:absolute;inset:0;width:100%;height:100%;cursor:grab}
+canvas.stage:active{cursor:grabbing}
+.fields{position:absolute;left:50%;top:calc(var(--u)*0.15);transform:translateX(-50%);z-index:4;
+  display:flex;flex-wrap:wrap;justify-content:center;gap:0 calc(var(--u)*0.85);
+  padding:calc(var(--u)*0.3) calc(var(--u)*0.8);pointer-events:none;max-width:calc(100% - var(--u)*6)}
+.fields .btn{pointer-events:auto}
+.hud{position:absolute;left:0;bottom:0;z-index:3;font-family:"IBM Plex Mono",monospace;
+  font-size:.68em;color:var(--faint);pointer-events:none}
+.cb{position:absolute;right:0;top:calc(var(--u)*1.8);z-index:3;width:calc(var(--u)*3.4);
+  display:flex;flex-direction:column;align-items:flex-end;gap:2px;pointer-events:none}
+.cb .strip{width:calc(var(--u)*0.5);height:calc(var(--u)*8);border:1px solid var(--line2)}
+.cb .tk{font-family:"IBM Plex Mono",monospace;font-size:.6em;color:var(--faint);font-style:italic}
+.side{display:flex;flex-direction:column;gap:calc(var(--u)*0.7);overflow-y:auto;min-height:0;padding-right:2px}
+.side section{border-bottom:1px solid var(--line);padding-bottom:calc(var(--u)*0.6)}
+.side section:last-child{border-bottom:0}
+.side h2{margin:0 0 calc(var(--u)*0.35);font-family:"IBM Plex Mono",monospace;font-size:.58em;
+  letter-spacing:.13em;text-transform:uppercase;color:var(--faint);font-weight:400}
+.btn{appearance:none;border:0;background:none;padding:0;cursor:pointer;color:var(--soft);
+  font:400 .86em/1.55 "IBM Plex Sans",sans-serif;border-bottom:1px solid transparent}
+.btn:hover{color:var(--accent)}
+.btn[aria-pressed="true"]{color:var(--accent);border-bottom-color:var(--accent)}
+.btn[disabled]{opacity:.35;cursor:default}
+.row{display:flex;flex-wrap:wrap;gap:2px 0.8em;align-items:baseline}
+input[type=range]{width:100%;accent-color:var(--accent);margin:.3em 0}
+.kv{display:flex;justify-content:space-between;font-family:"IBM Plex Mono",monospace;
+  font-size:.66em;color:var(--soft);gap:.6em}
+.kv b{font-weight:500;color:var(--ink)}
+.note{font-size:.66em;color:var(--faint);line-height:1.4;margin-top:.35em}
+#conv{width:100%;height:auto;display:block;margin-top:.2em}
+</style>
+
+<div class="app">
+  <div class="viewport">
+    <canvas id="scene" class="stage"></canvas>
+    <div class="fields" id="fieldrow"></div>
+    <div class="cb"><div class="tk" id="cbhi">–</div><div class="strip" id="cbstrip"></div>
+      <div class="tk" id="cblo">–</div><div class="tk" id="cbunit" style="margin-top:.2em"></div></div>
+    <div class="hud" id="hud">drag orbit · wheel zoom · shift-drag pan · double-click reset</div>
+  </div>
+  <div class="side">
+    <section><h2>Iteration</h2>
+      <input type="range" id="it" min="0" max="29" value="29" step="1">
+      <div class="kv"><span id="itlab">iteration 150</span><button class="btn" id="play">▶ play</button></div>
+      <canvas id="conv" width="440" height="150"></canvas>
+      <div class="note" id="convnote"></div>
+    </section>
+    <section><h2>Iso-level ρ̄</h2>
+      <input type="range" id="thr" min="0.05" max="0.95" value="0.5" step="0.05">
+      <div class="kv"><span>ρ̄ &gt;</span><b id="thrv">0.50</b></div>
+      <div class="kv"><span>solid tets</span><b id="nsolid">–</b></div>
+      <div class="kv"><span>surface faces</span><b id="nface">–</b></div>
+    </section>
+    <section><h2>Mesh</h2>
+      <div class="row"><button class="btn" id="bdef" aria-pressed="true">deformed</button>
+        <button class="btn" id="bund" aria-pressed="false">undeformed</button></div>
+      <div class="kv"><span>max node move</span><b id="mmove">–</b></div>
+      <div class="kv"><span>min |K|</span><b id="mvol">–</b></div>
+      <div class="kv"><span>min dihedral</span><b id="mdih">–</b></div>
+      <div class="kv"><span>max aspect</span><b id="masp">–</b></div>
+    </section>
+    <section><h2>Design</h2>
+      <div class="kv"><span>compliance</span><b id="sC">–</b></div>
+      <div class="kv"><span>volume / budget</span><b id="sV">–</b></div>
+      <div class="kv"><span>M<sub>nd</sub></span><b id="sM">–</b></div>
+      <canvas id="hist" width="440" height="110"></canvas>
+      <div class="note">density histogram over all tetrahedra</div>
+    </section>
+    <section><h2>Provenance</h2>
+      <div class="note" id="prov"></div>
+    </section>
+  </div>
+</div>
+
+<script>
+const BUILTIN = {};
+</script>
+
+<script>
+const D = BUILTIN, M = D.meta;
+const NT = M.nt, NN = M.nn, NF = M.nf;
+const CELLS = D.cells;
+const FRAMES_RHO = D.frames.rho, FRAMES_PTS = D.frames.pts;
+
+// ---- state
+let rot = {az: -0.72, el: 0.42}, zoom = 1, pan = {x: 0, y: 0};
+let frame = NF - 1, thr = 0.5, field = "rho", deformed = true, playing = null;
+let proj = null;
+
+const FIELDS = {
+  rho:    {label: "ρ̄  physical density", unit: "–",     kind: "seq", finalOnly: false},
+  moved:  {label: "|Δx|  node movement",  unit: "len",   kind: "seq", finalOnly: true},
+  aspect: {label: "aspect ratio",         unit: "–",     kind: "seq", finalOnly: true},
+  dihmin: {label: "min dihedral",         unit: "deg",   kind: "seq", finalOnly: true},
+};
+
+const VIRIDIS=[[68,1,84],[72,40,120],[62,74,137],[49,104,142],[38,130,142],[31,158,137],[53,183,121],[109,205,89],[180,222,44],[253,231,37]];
+const CIVIDIS=[[0,32,76],[0,53,109],[38,74,113],[64,94,116],[89,113,120],[113,133,124],[139,154,123],[168,175,117],[199,197,104],[231,220,83]];
+function ramp(t, tbl){
+  t = t<0?0:(t>1?1:t); if(!isFinite(t)) t=0;
+  const s = t*(tbl.length-1), i = Math.min(tbl.length-2, Math.floor(s)), f = s-i;
+  const a = tbl[i], b = tbl[i+1];
+  return [a[0]+(b[0]-a[0])*f, a[1]+(b[1]-a[1])*f, a[2]+(b[2]-a[2])*f];
+}
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+// ---- data accessors
+function rhoAt(f){ return FRAMES_RHO[f]; }
+function ptsAt(f){ return deformed ? FRAMES_PTS[f] : D.pts0; }
+function faceValue(t, nodes){
+  if(field === "moved"){ let s=0; for(const n of nodes) s += D.moved[n]; return s/nodes.length; }
+  return D.fields[field] ? D.fields[field][t] : rhoAt(frame)[t];
+}
+
+// ---- the iso-surface: faces of solid tets used exactly once
+const LF = [[0,1,2],[0,1,3],[0,2,3],[1,2,3]];
+function surface(rho, level){
+  const seen = new Map();
+  let nsolid = 0;
+  for(let t=0; t<NT; t++){
+    if(rho[t] <= level) continue;
+    nsolid++;
+    const c0=CELLS[4*t], c1=CELLS[4*t+1], c2=CELLS[4*t+2], c3=CELLS[4*t+3];
+    const c=[c0,c1,c2,c3];
+    for(const f of LF){
+      const a=[c[f[0]],c[f[1]],c[f[2]]].sort((x,y)=>x-y);
+      const k=(a[0]*NN + a[1])*NN + a[2];
+      if(seen.has(k)) seen.delete(k);          // shared by two solid tets -> interior
+      else seen.set(k, {n:a, t});
+    }
+  }
+  return {faces: Array.from(seen.values()), nsolid};
+}
+
+// ---- projection: orthographic yaw-then-pitch, exactly the console's P()
+function project(pts, faces){
+  const ca=Math.cos(rot.az), sa=Math.sin(rot.az), ce=Math.cos(rot.el), se=Math.sin(rot.el);
+  const cx=M.L/2, cy=M.H/2, cz=M.W/2;
+  const cache = new Float64Array(NN*3), done = new Uint8Array(NN);
+  const P = n => {
+    if(!done[n]){
+      const wx=pts[3*n]-cx, wy=pts[3*n+1]-cy, wz=pts[3*n+2]-cz;
+      const X=wx*ca+wz*sa, Z=-wx*sa+wz*ca;
+      cache[3*n]=X; cache[3*n+1]=wy*ce-Z*se; cache[3*n+2]=wy*se+Z*ce;
+      done[n]=1;
+    }
+    return [cache[3*n], cache[3*n+1], cache[3*n+2]];
+  };
+  const items=[];
+  let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;
+  for(const f of faces){
+    const p=[P(f.n[0]),P(f.n[1]),P(f.n[2])];
+    for(const q of p){ if(q[0]<x0)x0=q[0]; if(q[0]>x1)x1=q[0]; if(q[1]<y0)y0=q[1]; if(q[1]>y1)y1=q[1]; }
+    items.push({pts:p, d:(p[0][2]+p[1][2]+p[2][2])/3, v:faceValue(f.t, f.n)});
+  }
+  items.sort((a,b)=>a.d-b.d);                  // painter's: far first
+  return {items, x0, x1, y0, y1};
+}
+
+// ---- scale policy: pooled over the frames the field is defined on, 1-99 percentile
+function scaleFor(){
+  let vals;
+  if(field === "rho"){ vals = []; for(const fr of FRAMES_RHO) for(const v of fr) vals.push(v); }
+  else if(field === "moved") vals = D.moved.slice();
+  else vals = D.fields[field].slice();
+  vals = vals.filter(isFinite).sort((a,b)=>a-b);
+  const lo = vals[Math.floor(0.01*(vals.length-1))], hi = vals[Math.floor(0.99*(vals.length-1))];
+  return [lo, hi > lo ? hi : lo+1e-9];
+}
+
+// ---- draw
+const scene = document.getElementById("scene"), gs = scene.getContext("2d");
+const MAXPX = 4.2e6;
+function fitCanvas(c){
+  const r = c.getBoundingClientRect();
+  let dpr = Math.min(window.devicePixelRatio||1, 2);
+  while(r.width*dpr*r.height*dpr > MAXPX && dpr > 0.6) dpr *= 0.85;
+  c.width = Math.max(1, Math.round(r.width*dpr)); c.height = Math.max(1, Math.round(r.height*dpr));
+  return dpr;
+}
+let SURF = null;
+function rebuild(){
+  SURF = surface(rhoAt(frame), thr);
+  document.getElementById("nsolid").textContent = SURF.nsolid + " / " + NT;
+  document.getElementById("nface").textContent = SURF.faces.length;
+}
+function drawScene(){
+  fitCanvas(scene);
+  const W = scene.width, H = scene.height;
+  gs.clearRect(0,0,W,H);
+  const pts = ptsAt(frame);
+  const pr = project(pts, SURF.faces);
+  const pad = Math.min(W,H)*0.09;
+  const sc = Math.min((W-2*pad)/((pr.x1-pr.x0)||1), (H-2*pad)/((pr.y1-pr.y0)||1))*zoom;
+  const px = p => W/2 + pan.x + (p[0]-(pr.x0+pr.x1)/2)*sc;
+  const py = p => H/2 + pan.y - (p[1]-(pr.y0+pr.y1)/2)*sc;
+  proj = {px, py, items: pr.items};
+
+  const [lo,hi] = scaleFor();
+  const tbl = field === "rho" ? VIRIDIS : CIVIDIS;
+  const Lt = [0.34,0.60,0.72];
+  const lw = Math.max(0.4, H*0.0005);
+  for(const it of pr.items){
+    const A=it.pts[0],B=it.pts[1],Cq=it.pts[2];
+    // normal in SCREEN space, so the light stays fixed to the camera as you orbit
+    const nx=(B[1]-A[1])*(Cq[2]-A[2])-(B[2]-A[2])*(Cq[1]-A[1]);
+    const ny=(B[2]-A[2])*(Cq[0]-A[0])-(B[0]-A[0])*(Cq[2]-A[2]);
+    const nz=(B[0]-A[0])*(Cq[1]-A[1])-(B[1]-A[1])*(Cq[0]-A[0]);
+    const nl=Math.hypot(nx,ny,nz)||1;
+    const lam=Math.min(1,Math.max(.3,Math.abs((nx*Lt[0]+ny*Lt[1]+nz*Lt[2])/nl)*.8+.34));
+    const [r,g,b]=ramp((it.v-lo)/((hi-lo)||1), tbl);
+    const col=`rgb(${Math.round(r*lam)},${Math.round(g*lam)},${Math.round(b*lam)})`;
+    gs.beginPath(); gs.moveTo(px(A),py(A)); gs.lineTo(px(B),py(B)); gs.lineTo(px(Cq),py(Cq)); gs.closePath();
+    gs.fillStyle=col; gs.fill();
+    gs.strokeStyle=col; gs.lineWidth=lw; gs.stroke();   // close hairline seams between faces
+  }
+  drawTriad(W,H);
+  const fmt = v => Math.abs(v)>=100?v.toFixed(0):(Math.abs(v)>=1?v.toFixed(2):v.toFixed(3));
+  document.getElementById("cbhi").textContent = fmt(hi);
+  document.getElementById("cblo").textContent = fmt(lo);
+  document.getElementById("cbunit").textContent = FIELDS[field].unit === "–" ? "" : FIELDS[field].unit;
+  const stops=[]; for(let i=0;i<=10;i++){ const [r,g,b]=ramp(i/10,tbl); stops.push(`rgb(${r|0},${g|0},${b|0}) ${i*10}%`); }
+  document.getElementById("cbstrip").style.background = `linear-gradient(to top, ${stops.join(",")})`;
+}
+function drawTriad(W,H){
+  const ca=Math.cos(rot.az), sa=Math.sin(rot.az), ce=Math.cos(rot.el), se=Math.sin(rot.el);
+  const p3 = v => { const X=v[0]*ca+v[2]*sa, Z=-v[0]*sa+v[2]*ca; return [X, v[1]*ce-Z*se]; };
+  const ox=W-Math.min(W,H)*0.11, oy=H-Math.min(W,H)*0.09, s=Math.min(W,H)*0.055;
+  gs.font=`${Math.round(s*0.42)}px "IBM Plex Mono", monospace`;
+  gs.textAlign="center"; gs.textBaseline="middle";
+  [["x",[1,0,0]],["y",[0,1,0]],["z",[0,0,1]]].forEach(([nm,v])=>{
+    const q=p3(v);
+    gs.strokeStyle=css("--ink-faint"); gs.lineWidth=Math.max(1,H*0.0012);
+    gs.beginPath(); gs.moveTo(ox,oy); gs.lineTo(ox+q[0]*s, oy-q[1]*s); gs.stroke();
+    gs.fillStyle=css("--ink-soft"); gs.fillText(nm, ox+q[0]*s*1.28, oy-q[1]*s*1.28);
+  });
+}
+
+// ---- convergence + histogram
+function drawConv(){
+  const c=document.getElementById("conv"), g=c.getContext("2d");
+  const dpr=fitCanvas(c), W=c.width, H=c.height;
+  g.clearRect(0,0,W,H);
+  const it=D.hist.it, C=D.hist.C;
+  const lo=Math.min(...C), hi=Math.max(...C), pad=8*dpr;
+  const X=i=>pad+(W-2*pad)*(i/(C.length-1)), Y=v=>H-pad-(H-2*pad)*((v-lo)/((hi-lo)||1));
+  g.strokeStyle=css("--line2"); g.lineWidth=1*dpr;
+  g.beginPath(); g.moveTo(pad,H-pad); g.lineTo(W-pad,H-pad); g.stroke();
+  g.strokeStyle=css("--accent"); g.lineWidth=1.6*dpr; g.beginPath();
+  C.forEach((v,i)=>{ i?g.lineTo(X(i),Y(v)):g.moveTo(X(i),Y(v)); }); g.stroke();
+  g.fillStyle=css("--accent");
+  g.beginPath(); g.arc(X(frame),Y(C[frame]),3.2*dpr,0,7); g.fill();
+  g.fillStyle=css("--ink-faint"); g.font=`${Math.round(9*dpr)}px "IBM Plex Mono", monospace`;
+  g.textAlign="left";  g.fillText("C "+hi.toFixed(1), pad, pad+7*dpr);
+  g.textAlign="right"; g.fillText(lo.toFixed(1), W-pad, H-pad-3*dpr);
+}
+function drawHist(){
+  const c=document.getElementById("hist"), g=c.getContext("2d");
+  const dpr=fitCanvas(c), W=c.width, H=c.height, NB=28;
+  g.clearRect(0,0,W,H);
+  const r=rhoAt(frame), b=new Array(NB).fill(0);
+  for(const v of r) b[Math.min(NB-1, Math.max(0, Math.floor(v*NB)))]++;
+  const mx=Math.max(...b), pad=6*dpr, bw=(W-2*pad)/NB;
+  for(let i=0;i<NB;i++){
+    const hgt=(H-2*pad)*(b[i]/(mx||1));
+    const [rr,gg,bb]=ramp(i/(NB-1), VIRIDIS);
+    g.fillStyle=`rgb(${rr|0},${gg|0},${bb|0})`;
+    g.fillRect(pad+i*bw, H-pad-hgt, bw*0.86, hgt);
+  }
+}
+
+// ---- stats
+function stats(){
+  const g=(id,v)=>document.getElementById(id).textContent=v;
+  g("sC", D.hist.C[frame].toFixed(3));
+  g("sV", D.hist.V[frame].toFixed(4));
+  g("sM", D.hist.mnd[frame].toFixed(4));
+  g("mmove", M.maxmove.toFixed(4)+" / "+(Math.sqrt(3)*M.movebound).toFixed(4));
+  g("mvol", M.minvol.toExponential(2));
+  g("mdih", M.mindih.toFixed(2)+"°");
+  g("masp", M.maxaspect.toFixed(2));
+  g("itlab", "iteration "+D.hist.it[frame]);
+  document.getElementById("convnote").textContent =
+    `compliance ${D.hist.C[0].toFixed(1)} → ${D.hist.C[D.hist.C.length-1].toFixed(1)} over ${M.iters} MMA iterations`;
+  document.getElementById("prov").innerHTML =
+    `${M.nt} tetrahedra, ${M.nn} nodes · SIMP p=${M.penal}, volume fraction ${M.volfrac}<br>`+
+    `design = [ρ, d<sub>x</sub>, d<sub>y</sub>, d<sub>z</sub>] · patch filter on edge fans · MMA<br>`+
+    `every quantity drawn is computed by jNO on this run.`;
+}
+
+function redraw(){ rebuild(); drawScene(); drawConv(); drawHist(); stats(); }
+
+// ---- controls
+const frow=document.getElementById("fieldrow");
+Object.entries(FIELDS).forEach(([k,f])=>{
+  const b=document.createElement("button");
+  b.className="btn"; b.textContent=f.label; b.setAttribute("aria-pressed", k===field);
+  b.onclick=()=>{
+    field=k;
+    if(f.finalOnly){ frame=NF-1; document.getElementById("it").value=NF-1; }
+    document.getElementById("it").disabled = !!f.finalOnly;
+    [...frow.children].forEach(x=>x.setAttribute("aria-pressed", x===b));
+    document.getElementById("hud").textContent = f.finalOnly
+      ? "computed on the final configuration only — the iteration slider is pinned"
+      : "drag orbit · wheel zoom · shift-drag pan · double-click reset";
+    redraw();
+  };
+  frow.appendChild(b);
+});
+const itEl=document.getElementById("it");
+itEl.max=NF-1; itEl.value=NF-1;
+itEl.oninput=()=>{ frame=+itEl.value; redraw(); };
+document.getElementById("thr").oninput=e=>{
+  thr=+e.target.value; document.getElementById("thrv").textContent=thr.toFixed(2); redraw();
+};
+document.getElementById("play").onclick=function(){
+  if(playing){ clearInterval(playing); playing=null; this.textContent="▶ play"; return; }
+  this.textContent="❚❚ pause";
+  playing=setInterval(()=>{
+    frame=(frame+1)%NF; itEl.value=frame; redraw();
+    if(frame===NF-1){ clearInterval(playing); playing=null; document.getElementById("play").textContent="▶ play"; }
+  }, 110);
+};
+function meshBtn(id, val){
+  document.getElementById(id).onclick=()=>{
+    deformed=val;
+    document.getElementById("bdef").setAttribute("aria-pressed", val);
+    document.getElementById("bund").setAttribute("aria-pressed", !val);
+    redraw();
+  };
+}
+meshBtn("bdef", true); meshBtn("bund", false);
+
+let drag=null;
+scene.addEventListener("pointerdown", e=>{
+  scene.setPointerCapture(e.pointerId);
+  drag={x:e.clientX, y:e.clientY, az:rot.az, el:rot.el, p0:{...pan}, pan:e.shiftKey};
+});
+scene.addEventListener("pointermove", e=>{
+  if(!drag) return;
+  const dx=e.clientX-drag.x, dy=e.clientY-drag.y;
+  if(drag.pan){ const k=scene.width/scene.getBoundingClientRect().width; pan.x=drag.p0.x+dx*k; pan.y=drag.p0.y+dy*k; }
+  else { rot.az=drag.az+dx*0.008; rot.el=Math.max(-1.45, Math.min(1.45, drag.el+dy*0.008)); }
+  drawScene();
+});
+scene.addEventListener("pointerup", ()=>{ drag=null; });
+scene.addEventListener("wheel", e=>{
+  e.preventDefault();
+  zoom=Math.max(0.35, Math.min(14, zoom*Math.exp(-e.deltaY*0.0016)));
+  drawScene();
+}, {passive:false});
+scene.addEventListener("dblclick", ()=>{ zoom=1; pan={x:0,y:0}; rot={az:-0.72, el:0.42}; drawScene(); });
+window.addEventListener("resize", ()=>{ drawScene(); drawConv(); drawHist(); });
+matchMedia("(prefers-color-scheme:dark)").addEventListener("change", redraw);
+
+document.getElementById("thrv").textContent=thr.toFixed(2);
+redraw();
+</script>

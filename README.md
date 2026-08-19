@@ -34,6 +34,16 @@ jrun scripts/show_mesh.py                            # refinement preview, no ru
 
 Already cloned without `--recurse-submodules`? `git submodule update --init`.
 
+!!! warning "Watch the shell spaces, and set `SOLVER`"
+    Every knob is an environment variable, so `CUDA_VISIBLE_DEVICES=1HMESH=0.17` (no space) sets
+    **neither** — `HMESH` falls back to `0.10`, i.e. 64,816 tets instead of 14,063. The run prints
+    its resolved `CONFIG` line at startup; check it against what you asked for.
+
+    And a GPU does **not** speed this up on its own. The linear solve dominates — at 65k tets it is
+    ~95 % of an iteration — and the default backend factorises on the host. Measured on an A100
+    with `SOLVER` unset: **82 s/iteration at 64,816 tets**, which is what the same problem costs on
+    a CPU. Pick a backend, or the accelerator is idle for the part that matters.
+
 Everything lands in `runs/`. Set `OUTDIR=/scratch/...` to send it elsewhere.
 
 ### On the H200 cluster

@@ -47,7 +47,18 @@ d = jno.Shape.box(0, 0, 0, L, H, W, size=H_MESH).domain()
 cells = np.asarray(d._cells_p1())
 pts0 = np.asarray(d.mesh.points)[:, :3]
 NT = cells.shape[0]
-print(f"tets={NT}  nodes={pts0.shape[0]}  dofs={3 * pts0.shape[0]}  PSTAR={PSTAR}", flush=True)
+# Echo the RESOLVED configuration, loudly. Every knob is an env var, so a missing shell space --
+# `CUDA_VISIBLE_DEVICES=1HMESH=0.17` sets neither -- silently runs a different problem than intended.
+# Observed: that exact typo ran 64,816 tets instead of 14,063 and nobody noticed for 14 minutes.
+_cfg = dict(HMESH=H_MESH, tets=NT, dofs=3 * pts0.shape[0], SOLVER=os.environ.get("SOLVER", "<default>") or "<default>",
+            PSTAR=PSTAR, BUDGET=BUDGET, MOVING=os.environ.get("MOVING", "1"),
+            PENALP=os.environ.get("PENALP", "1"), BETA_H=os.environ.get("BETA_H", "0"), TAG=TAG)
+print("=" * 78, flush=True)
+print("  CONFIG  " + "  ".join(f"{k}={v}" for k, v in _cfg.items()), flush=True)
+for _k in ("HMESH", "PSTAR", "BUDGET", "SOLVER"):
+    if _k not in os.environ:
+        print(f"  NOTE    {_k} not set in the environment -- using the default above.", flush=True)
+print("=" * 78, flush=True)
 
 # --- design variables 2-4: interior nodal coordinates, per-node box bounds --------------------
 MOVING = os.environ.get("MOVING", "1") == "1"
@@ -90,7 +101,31 @@ patch = d.patch_filter()
 # parameter; with a literal exponent the same design is fine, because there is no derivative in p.
 RHO_MIN = 1e-3
 _phys = (lambda r: jnp.where(pmask, 1.0, patch(r))) if os.environ.get("PMASK", "1") == "1" else patch
-rho.constrain(lambda r: jnp.clip(_phys(r), RHO_MIN, 1.0))
+
+# HEAVISIDE PROJECTION -- Wang, Lazarov & Sigmund, Struct. Multidisc. Optim. 43 (2011) 767-784,
+# after Guest, Prevost & Belytschko (2004). A manufactured part is one material, so intermediate
+# density is a relaxation, not a physical state: it exists because a hard 0/1 has zero gradient
+# everywhere and MMA would never move. This is the smoothed step that recovers the intent --
+#
+#     rho_bar = [tanh(beta*eta) + tanh(beta*(rho - eta))] / [tanh(beta*eta) + tanh(beta*(1 - eta))]
+#
+# differentiable for any finite beta, and -> a step as beta grows. beta is RAMPED (BETA_H is the
+# final value, reached geometrically) because projecting hard from iteration 0 freezes the topology
+# before it forms: the gradient away from the threshold vanishes and no element can cross back.
+BETA_H = float(os.environ.get("BETA_H", "0"))
+ETA_H = float(os.environ.get("ETA_H", "0.5"))
+_beta_now = [1.0]   # ramped by the callback below; a list so the closure sees the update
+
+
+def _project(x, b, eta=ETA_H):
+    tb = jnp.tanh(b * eta)
+    return (tb + jnp.tanh(b * (x - eta))) / (tb + jnp.tanh(b * (1.0 - eta)))
+
+
+if BETA_H > 0:
+    rho.constrain(lambda r: jnp.clip(_project(_phys(r), _beta_now[0]), RHO_MIN, 1.0))
+else:
+    rho.constrain(lambda r: jnp.clip(_phys(r), RHO_MIN, 1.0))
 print(f"pmask: {int(np.asarray(pmask).sum())} solid non-designable tets", flush=True)
 
 xi, yi, zi, _ = d.variable("interior", split=True)
@@ -139,6 +174,8 @@ it, t0 = 0, time.time()
 while time.time() - t0 < BUDGET:
     crux.solve(CHUNK, callbacks=callbacks)
     it += CHUNK
+    if BETA_H > 0:  # geometric ramp 1 -> BETA_H over the run, so the topology forms before it sets
+        _beta_now[0] = min(BETA_H, _beta_now[0] * 1.10)
     r = np.asarray(crux.eval([rho])).reshape(-1)
     p = pts0.copy()
     for sp, node in zip(coord_specs, coord_nodes):
@@ -150,7 +187,7 @@ while time.time() - t0 < BUDGET:
     frames_rho.append(r.copy())
     frames_pts.append(p.copy())
     print(f"  it {it:4d}  C={hist['C'][-1]:9.3f}  V={hist['V'][-1]:.4f}  P={hist['P'][-1]:9.2f}  "
-          f"M_nd={hist['mnd'][-1]:.4f}  penal={hist['penal'][-1]:.2f}  "
+          f"M_nd={hist['mnd'][-1]:.4f}  penal={hist['penal'][-1]:.2f}  beta_H={_beta_now[0]:.1f}  "
           f"g_ang={hist['ang'][-1]:.3f}  ({time.time() - t0:.0f}s)", flush=True)
 
 np.savez(os.path.join(OUT, f"topo3d_{TAG}.npz"), cells=cells, pts0=pts0,

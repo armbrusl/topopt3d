@@ -116,19 +116,48 @@ contrast — 244-1250 ms, an order of magnitude worse than the direct factorisat
 wrecks the multigrid rate is exactly what SIMP manufactures. `scripts/bench_solvers.py` reproduces
 this on dumped matrices.
 
-## Known blockers (measured, not guessed)
+## The solver: use `SOLVER=custom`
 
-1. **`backend="pardiso"` aborts with the patch filter.** glibc `double free or corruption`, at every
-   mesh size. Controlled A/B with no CUDA device visible: pardiso alone works, the filter alone works
-   under the default backend, the *pair* dies. Ruled out: the GPU, MKL threading (`MKL_NUM_THREADS=1`),
-   `pure_callback` concurrency (a lock did not help and cost 15-20%), the adjoint/transpose path, and
-   both cache-eviction sites (instrumented; neither fires). Cause still open. **So the speed-up table
-   above is not currently reachable on a design run** — it was measured without the filter.
-2. **`penal` as a differentiable parameter NaNs with the patch filter**, on the first solve:
+`scripts/pardiso_solver.py` drives MKL PARDISO through one `pure_callback` with a hand-written
+adjoint, and is the default. Measured against jNO's default backend, per design iteration, **with
+the patch filter on**:
+
+| tets | default | `SOLVER=custom` | speed-up |
+|---|---|---|---|
+| 8,802 | 2,116 ms | 933 ms | 2.3x |
+| 14,063 | 4,048 ms | 1,247 ms | 3.2x |
+| 24,787 | 12,713 ms | 1,991 ms | **6.4x** |
+| 64,816 | ~74 s (an A100 measured 82 s) | **4,263 ms** | **~17x** |
+
+Compliance agrees with the default backend to 4-5 digits at every size; the solution matches to
+5e-13 and the adjoint to 3.5e-14 against jNO's own (`scripts/`, correctness test). So a 30-minute
+budget is now **~400 iterations at 64,816 tets** rather than ~24.
+
+It exists because **jNO's own `lu(backend="pardiso")` aborts the process** — glibc `double free or
+corruption` — whenever a P0 density carries `rho.constrain(d.patch_filter())`. That was chased at
+length and the cause was NOT found; ruled out were the GPU, MKL threading, `pure_callback`
+concurrency, the adjoint path, both cache-eviction sites, `_check_A`, buffer aliasing, and matrix
+rebinding. The decisive clue is that **standalone pypardiso solves the very same pathological
+operator in 2.5 ms with a 1.2e-12 residual** — so the fault is in that backend's caching and phase
+driving, not in MKL, and going around it costs only the symbolic-analysis reuse (~20 %).
+
+Conditioning is what triggers it: with `E = EMIN + rho^3(E0-EMIN)`, `EMIN=1e-4` and `1e-3` both
+abort while `1e-2` survives. Note that flooring `rho_bar` is **not** a conditioning lever — at
+`rho_bar=1e-3` the SIMP term contributes 1e-9 and EMIN swamps it entirely.
+
+**An iterative solver is not the shortcut it looks like.** SA-AMG + CG with elasticity's
+near-nullspace converges (residual 1e-11) but needs 103-145 CG iterations against the 1e3 SIMP
+contrast — 244-1250 ms, an order of magnitude worse than the direct factorisation. The contrast
+that wrecks the multigrid rate is exactly what SIMP manufactures. `scripts/bench_solvers.py`
+reproduces this on dumped matrices.
+
+## Other known blockers (measured, not guessed)
+
+1. **`penal` as a differentiable parameter NaNs with the patch filter**, on the first solve:
    `d/dp(rho^p) = rho^p ln(rho)` and the filter's `(prod)^(1/(N-2))` both blow up where the physical
    density reaches exactly zero. Flooring it at 1e-3 did not clear it. **So SIMP continuation is off**
    (`PENALP=0`), which is tolerable — jNO measured that it never fires in the published 2-D run.
-3. **Length-scale control is not optional.** Without a perimeter barrier the continuum problem is not
+2. **Length-scale control is not optional.** Without a perimeter barrier the continuum problem is not
    well posed and the design fragments at *any* resolution — a finer mesh gives finer speckle, not a
    cleaner truss. Set `PSTAR`; there is no sensible default because in 3-D it is an **area**.
 
@@ -148,7 +177,7 @@ All via environment, so a cluster job needs no edits:
 | `PSTAR` | `0` | perimeter (**area**) target; 0 disables the barrier |
 | `BUDGET` | `1680` | seconds of design loop — the run is wall-clock budgeted, not iteration-counted |
 | `CHUNK` | `10` | iterations between snapshots |
-| `SOLVER` | `""` | jNO’s default backend — the only one that works with the patch filter today. Also `host`, `pardiso`, `cudss` |
+| `SOLVER` | `custom` | MKL PARDISO via `scripts/pardiso_solver.py` — **recommended**. Also `""` (jNO default), `host`, `device`. Not `pardiso`: it aborts, see above |
 | `MOVING` | `1` | `0` freezes the mesh (density-only) |
 | `PENALP` | `1` | `0` uses a literal SIMP exponent — **required** while blocker 2 stands |
 | `PMASK` | `1` | solid non-designable material under the load |

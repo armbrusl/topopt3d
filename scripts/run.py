@@ -12,6 +12,7 @@ machine does.
 """
 
 import os
+import sys
 import time
 
 import jax
@@ -144,8 +145,18 @@ assert _load > 1e-9, f"traction band assembled |f| = {_load:.2e}; widen SPAN pas
 print(f"load |f| = {_load:.4f}", flush=True)
 
 cellv = d.cell_volume()
-_BK = os.environ.get("SOLVER", "")   # default = jNO's own backend: the only one that survives the patch filter (blocker 1)
-compliance = (E(rho) * a(eps(u), eps(u))).integrate(fem, solver=(jno.solve.lu(backend=_BK) if _BK else None))
+# SOLVER="custom" is the recommended setting: MKL PARDISO through scripts/pardiso_solver.py, which
+# bypasses jNO's own pardiso backend (that one aborts the process whenever the patch filter is on --
+# see the README). Measured against the default backend, per design iteration, with the filter ON:
+# 2.3x at 8,802 tets, 3.2x at 14,063, 6.4x at 24,787, and 4.26 s/it at 64,816 where the default
+# needs ~74 s. Compliance agrees to 4-5 digits at every size.
+_BK = os.environ.get("SOLVER", "custom")
+if _BK == "custom":
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from pardiso_solver import pardiso_lu as _spec
+else:
+    _spec = jno.solve.lu(backend=_BK) if _BK else None
+compliance = (E(rho) * a(eps(u), eps(u))).integrate(fem, solver=_spec)
 volume = (rho.reshape(-1) * cellv).sum / (VOLFRAC * cellv.sum)
 g_ang = ((2 * np.pi - d.cell_angles()) / (2 * np.pi - THETA_MIN)).reshape(-1).pnorm(PN, normalize=True)
 g_asp = (d.cell_aspect() / ASPECT_MAX).pnorm(PN, normalize=True)

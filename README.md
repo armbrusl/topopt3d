@@ -13,7 +13,7 @@ You need a jNO checkout on branch **`feat/topopt-3d`** (see *Requires* below) â€
 inside jNO's pixi environment via `--manifest-path`, so nothing has to be installed here.
 
 ```bash
-export JNO=/path/to/jNO                     # a checkout on branch feat/topopt-3d
+export JNO=/path/to/jNO   # git clone -b feat/topopt-3d git@github.com:FhG-IISB/jNO.git
 alias jrun="pixi run --manifest-path $JNO/pyproject.toml -e fem python"
 
 # 1. PROBE â€” no barrier, to measure the natural perimeter. PSTAR is an AREA in 3-D, so the
@@ -57,8 +57,13 @@ which adds:
 | `expr.integrate(fem, solver=...)` | choosing the linear backend at all |
 
 ```bash
-git clone -b feat/topopt-3d <jNO remote> jNO && cd jNO && pixi install -e fem
+git clone -b feat/topopt-3d git@github.com:FhG-IISB/jNO.git jNO
+cd jNO && pixi install -e fem
 ```
+
+The branch is pushed and sits on two prerequisites, so cloning it gets all three:
+`feat/p-adaptivity` (the interpolation-cover element) -> `feat/fem-functional`
+(`expr.integrate(fem)`) -> `feat/topopt-3d`. None is merged to `main` yet.
 
 ## Why edge fans and not vertex patches
 

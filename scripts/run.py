@@ -24,7 +24,9 @@ import optax  # noqa: E402
 
 import jno  # noqa: E402
 
-OUT = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.abspath(__file__))
+OUT = os.environ.get("OUTDIR") or os.path.join(os.path.dirname(HERE), "runs")
+os.makedirs(OUT, exist_ok=True)
 inner, symgrad, trace = jno.np.inner, jno.np.symgrad, jno.np.trace
 
 H_MESH = float(os.environ.get("HMESH", "0.10"))

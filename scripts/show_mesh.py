@@ -17,6 +17,8 @@ from matplotlib.collections import PolyCollection  # noqa: E402
 import jno  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+OUT = os.environ.get("OUTDIR") or os.path.join(os.path.dirname(HERE), "runs")
+os.makedirs(OUT, exist_ok=True)
 L, H, W = 4.0, 2.0, 2.0
 ACCENT = np.array([13, 148, 136]) / 255.0
 
@@ -90,5 +92,5 @@ for ax, (h, note) in zip(axes, SIZES):
     print(f"h={h}: {len(cells)} tets, {len(pts)} nodes, {3 * len(pts)} dofs, "
           f"mean edge {e.mean():.4f}, {L / e.mean():.1f} across the span", flush=True)
 
-fig.savefig(os.path.join(HERE, "mesh_refinement.png"))
+fig.savefig(os.path.join(OUT, "mesh_refinement.png"))
 print("wrote mesh_refinement.png")

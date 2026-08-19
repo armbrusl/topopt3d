@@ -19,7 +19,9 @@ import numpy as np  # noqa: E402
 import jno  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-run = np.load(os.path.join(HERE, "topo3d_run.npz"))
+OUT = os.environ.get("OUTDIR") or os.path.join(os.path.dirname(HERE), "runs")
+os.makedirs(OUT, exist_ok=True)
+run = np.load(os.path.join(OUT, os.environ.get("RUN", "topo3d_final.npz")))
 cells, pts0, pts_f, rho_f = (run[k] for k in ("cells", "pts0", "pts_f", "rho_f"))
 fr_rho, fr_pts = run["frames_rho"], run["frames_pts"]
 print(f"tets={cells.shape[0]} nodes={pts0.shape[0]} frames={fr_rho.shape[0]}")
@@ -65,12 +67,12 @@ data = {
 }
 
 blob = json.dumps(data, separators=(",", ":"))
-out_json = os.path.join(HERE, "topo3d_web.json")
+out_json = os.path.join(OUT, "topo3d_web.json")
 with open(out_json, "w") as f:
     f.write(blob)
 print(f"wrote {out_json}  ({len(blob) / 1e6:.2f} MB)")
 
-tpl = os.path.join(HERE, "topo3d_console.html")
+tpl = os.path.join(HERE, "console_template.html")
 if os.path.exists(tpl):
     html = open(tpl).read()
     new, n = re.subn(r"const BUILTIN = \{.*?\};\n", "const BUILTIN = " + blob + ";\n", html, count=1, flags=re.S)

@@ -14,7 +14,9 @@ import numpy as np
 from matplotlib.collections import PolyCollection
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-run = np.load(os.path.join(HERE, "topo3d_run.npz"))
+OUT = os.environ.get("OUTDIR") or os.path.join(os.path.dirname(HERE), "runs")
+os.makedirs(OUT, exist_ok=True)
+run = np.load(os.path.join(OUT, os.environ.get("RUN", "topo3d_final.npz")))
 cells, pts0 = run["cells"], run["pts0"]
 fr_rho, fr_pts = run["frames_rho"], run["frames_pts"]
 NT, NN, NF = cells.shape[0], pts0.shape[0], fr_rho.shape[0]
@@ -165,7 +167,7 @@ fig, axes = plt.subplots(1, 3, figsize=(12.5, 3.2))
 for ax, (az, el, lab) in zip(axes, [(-0.72, 0.42, "oblique"), (0.0, 0.0, "side  $x$–$y$"), (0.0, 1.5708, "plan  $x$–$z$")]):
     draw(ax, fr_pts[-1], faces_f, az=az, el=el)
     ax.set_title(lab)
-fig.savefig(os.path.join(HERE, "topo3d_structure.png"))
+fig.savefig(os.path.join(OUT, "topo3d_structure.png"))
 plt.close(fig)
 print("wrote topo3d_structure.png")
 
@@ -192,14 +194,14 @@ axH = fig.add_subplot(gs[1, 2])
 axH.hist(fr_rho[-1], bins=28, range=(0, 1), color="#0D9488", alpha=0.85)
 axH.set_xlabel(r"physical density $\bar\rho$"); axH.set_ylabel("tetrahedra")
 axH.set_yscale("log"); sns.despine(ax=axH)
-fig.savefig(os.path.join(HERE, "topo3d_summary.png"))
+fig.savefig(os.path.join(OUT, "topo3d_summary.png"))
 plt.close(fig)
 print("wrote topo3d_summary.png")
 
 # ------------------------------------------------------------------ 3. the evolution, as a GIF
 from PIL import Image  # noqa: E402
 
-tmp = os.path.join(HERE, "_frames")
+tmp = os.path.join(OUT, "_frames")
 os.makedirs(tmp, exist_ok=True)
 paths = []
 for i in range(NF):
@@ -215,6 +217,6 @@ for i in range(NF):
     paths.append(p)
 
 ims = [Image.open(p).convert("P", palette=Image.ADAPTIVE, colors=128) for p in paths]
-gif = os.path.join(HERE, "topo3d_evolution.gif")
+gif = os.path.join(OUT, "topo3d_evolution.gif")
 ims[0].save(gif, save_all=True, append_images=ims[1:] + [ims[-1]] * 8, duration=140, loop=0, optimize=True)
 print(f"wrote topo3d_evolution.gif  ({os.path.getsize(gif) / 1e6:.2f} MB, {len(ims)} frames)")

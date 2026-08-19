@@ -7,11 +7,41 @@ whose §2.3.2 leaves the tetrahedral case open. Built on [jNO](https://github.co
 The design vector is `[rho, d_x, d_y, d_z]`: one density per tetrahedron plus the position of every
 interior node. Every sensitivity comes from AD; nothing is hand-derived.
 
+## Run it
+
+You need a jNO checkout on branch **`feat/topopt-3d`** (see *Requires* below) — every command runs
+inside jNO's pixi environment via `--manifest-path`, so nothing has to be installed here.
+
 ```bash
-HMESH=0.17 PSTAR=64 BUDGET=1680 python scripts/run.py     # ~350 iterations at 14k tets
-python scripts/render.py                                   # stills + evolution GIF
-python scripts/export_console.py                           # interactive HTML console
+export JNO=/path/to/jNO                     # a checkout on branch feat/topopt-3d
+alias jrun="pixi run --manifest-path $JNO/pyproject.toml -e fem python"
+
+# 1. PROBE — no barrier, to measure the natural perimeter. PSTAR is an AREA in 3-D, so the
+#    2-D tutorial's value is meaningless and there is no sensible default.
+HMESH=0.17 PSTAR=0 PENALP=0 BUDGET=330 TAG=probe   jrun scripts/run.py
+
+# 2. RUN — set PSTAR to ~0.76 x the P the probe settled at (84.5 -> 64 at this mesh).
+HMESH=0.17 PSTAR=64 PENALP=0 BUDGET=1680 TAG=final jrun scripts/run.py
+
+# 3. FIGURES + the interactive 3-D console
+RUN=topo3d_final.npz jrun scripts/render.py          # stills + evolution GIF
+RUN=topo3d_final.npz jrun scripts/export_console.py  # runs/console.html
+jrun scripts/show_mesh.py                            # refinement preview, no run needed
 ```
+
+Everything lands in `runs/`. Set `OUTDIR=/scratch/...` to send it elsewhere.
+
+### On the H200 cluster
+
+```bash
+export JNO_DIR=/path/to/jNO
+sbatch cluster/h200.sbatch                        # defaults: SOLVER=cudss, HMESH=0.10, PSTAR=0 (probe)
+SOLVER=cudss HMESH=0.10 PSTAR=<0.76*P> BUDGET=3000 TAG=h200 sbatch cluster/h200.sbatch
+```
+
+Try **`SOLVER=cudss` first** — see *Cost* below for why. If it is unavailable or misbehaves,
+`SOLVER=""` uses the default backend, which always works.
+
 
 ## Requires jNO from an unmerged branch
 
@@ -104,7 +134,7 @@ All via environment, so a cluster job needs no edits:
 | `PSTAR` | `0` | perimeter (**area**) target; 0 disables the barrier |
 | `BUDGET` | `1680` | seconds of design loop — the run is wall-clock budgeted, not iteration-counted |
 | `CHUNK` | `10` | iterations between snapshots |
-| `SOLVER` | `pardiso` | `""` (default backend), `host`, `pardiso`, `cudss` |
+| `SOLVER` | `""` | jNO’s default backend — the only one that works with the patch filter today. Also `host`, `pardiso`, `cudss` |
 | `MOVING` | `1` | `0` freezes the mesh (density-only) |
 | `PENALP` | `1` | `0` uses a literal SIMP exponent — **required** while blocker 2 stands |
 | `PMASK` | `1` | solid non-designable material under the load |

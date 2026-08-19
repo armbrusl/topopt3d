@@ -18,7 +18,7 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false     # 141 GB is plenty; do not grab i
 # cuDSS is the backend to try FIRST here: it is not subject to the PARDISO blocker, and this
 # problem is its ideal case (sparsity fixed across every iteration -> cached symbolic plan).
 # Fall back to SOLVER="" (the default backend) if cuDSS is unavailable or misbehaves.
-export SOLVER="${SOLVER:-cudss}"
+export SOLVER="${SOLVER:-cudss}"   # untested here; SOLVER="" is the safe fallback
 export HMESH="${HMESH:-0.10}"       # 0.10 -> ~65k tets; go finer once a backend is proven
 export PSTAR="${PSTAR:-0}"          # 0 = PROBE. Read the settled P, then rerun with ~0.76*P
 export BUDGET="${BUDGET:-3000}"

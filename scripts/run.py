@@ -109,7 +109,7 @@ assert _load > 1e-9, f"traction band assembled |f| = {_load:.2e}; widen SPAN pas
 print(f"load |f| = {_load:.4f}", flush=True)
 
 cellv = d.cell_volume()
-_BK = os.environ.get("SOLVER", "pardiso")
+_BK = os.environ.get("SOLVER", "")   # default = jNO's own backend: the only one that survives the patch filter (blocker 1)
 compliance = (E(rho) * a(eps(u), eps(u))).integrate(fem, solver=(jno.solve.lu(backend=_BK) if _BK else None))
 volume = (rho.reshape(-1) * cellv).sum / (VOLFRAC * cellv.sum)
 g_ang = ((2 * np.pi - d.cell_angles()) / (2 * np.pi - THETA_MIN)).reshape(-1).pnorm(PN, normalize=True)

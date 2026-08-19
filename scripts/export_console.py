@@ -27,7 +27,11 @@ fr_rho, fr_pts = run["frames_rho"], run["frames_pts"]
 print(f"tets={cells.shape[0]} nodes={pts0.shape[0]} frames={fr_rho.shape[0]}")
 
 # --- per-tet mesh-quality fields on the FINAL deformed mesh, through jNO's own nodes ----------
-L, H, W, h = 4.0, 2.0, 2.0, 0.30
+# The mesh must be rebuilt to evaluate the geometry nodes on the deformed configuration, so it has
+# to match the run exactly -- hence HMESH from the environment, the same knob run.py takes. The
+# assertion below is what catches a mismatch instead of silently reporting another mesh's quality.
+L, H, W = 4.0, 2.0, 2.0
+h = float(os.environ.get("HMESH", "0.10"))
 d = jno.Shape.box(0, 0, 0, L, H, W, size=h).domain()
 assert np.array_equal(np.asarray(d._cells_p1()), cells), "mesh differs from the run"
 d.mesh.points[:, :3] = pts_f  # evaluate the geometry nodes ON the deformed configuration
@@ -42,7 +46,7 @@ r = lambda a, n: np.round(np.asarray(a, float), n).tolist()  # noqa: E731
 
 data = {
     "meta": {
-        "L": L, "H": H, "W": W, "h": h, "volfrac": 0.20, "penal": 3.0,
+        "L": L, "H": H, "W": W, "h": h, "volfrac": float(os.environ.get("VOLFRAC", "0.20")), "penal": 3.0,
         "nt": int(cells.shape[0]), "nn": int(pts0.shape[0]), "nf": int(fr_rho.shape[0]),
         "iters": int(run["it"][-1]),
         "C0": float(run["C"][0]), "C1": float(run["C"][-1]),
@@ -73,9 +77,10 @@ with open(out_json, "w") as f:
 print(f"wrote {out_json}  ({len(blob) / 1e6:.2f} MB)")
 
 tpl = os.path.join(HERE, "console_template.html")
+dst = os.path.join(OUT, "console.html")
 if os.path.exists(tpl):
     html = open(tpl).read()
     new, n = re.subn(r"const BUILTIN = \{.*?\};\n", "const BUILTIN = " + blob + ";\n", html, count=1, flags=re.S)
     assert n == 1, "BUILTIN marker not found in the template"
-    open(tpl, "w").write(new)
-    print(f"inlined into {tpl}  ({len(new) / 1e6:.2f} MB)")
+    open(dst, "w").write(new)
+    print(f"wrote {dst}  ({len(new) / 1e6:.2f} MB)")

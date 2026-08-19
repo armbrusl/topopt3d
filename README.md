@@ -9,16 +9,19 @@ interior node. Every sensitivity comes from AD; nothing is hand-derived.
 
 ## Run it
 
-You need a jNO checkout on branch **`feat/topopt-3d`** (see *Requires* below) — every command runs
-inside jNO's pixi environment via `--manifest-path`, so nothing has to be installed here.
+jNO comes with the repo as a **pinned submodule** (`vendor/jNO`, branch `feat/topopt-3d`), so there
+is nothing to clone separately and no version to get wrong.
 
 ```bash
-export JNO=/path/to/jNO   # git clone -b feat/topopt-3d git@github.com:FhG-IISB/jNO.git
-alias jrun="pixi run --manifest-path $JNO/pyproject.toml -e fem python"
+git clone --recurse-submodules git@github.com:armbrusl/topopt3d.git
+cd topopt3d
+pixi install --manifest-path vendor/jNO/pyproject.toml -e fem     # once, ~minutes
+
+alias jrun="pixi run --manifest-path vendor/jNO/pyproject.toml -e fem python"
 
 # 1. PROBE — no barrier, to measure the natural perimeter. PSTAR is an AREA in 3-D, so the
 #    2-D tutorial's value is meaningless and there is no sensible default.
-HMESH=0.17 PSTAR=0 PENALP=0 BUDGET=330 TAG=probe   jrun scripts/run.py
+HMESH=0.17 PSTAR=0  PENALP=0 BUDGET=330  TAG=probe jrun scripts/run.py
 
 # 2. RUN — set PSTAR to ~0.76 x the P the probe settled at (84.5 -> 64 at this mesh).
 HMESH=0.17 PSTAR=64 PENALP=0 BUDGET=1680 TAG=final jrun scripts/run.py
@@ -29,41 +32,37 @@ RUN=topo3d_final.npz jrun scripts/export_console.py  # runs/console.html
 jrun scripts/show_mesh.py                            # refinement preview, no run needed
 ```
 
+Already cloned without `--recurse-submodules`? `git submodule update --init`.
+
 Everything lands in `runs/`. Set `OUTDIR=/scratch/...` to send it elsewhere.
 
 ### On the H200 cluster
 
 ```bash
-export JNO_DIR=/path/to/jNO
-sbatch cluster/h200.sbatch                        # defaults: SOLVER=cudss, HMESH=0.10, PSTAR=0 (probe)
-SOLVER=cudss HMESH=0.10 PSTAR=<0.76*P> BUDGET=3000 TAG=h200 sbatch cluster/h200.sbatch
+git clone --recurse-submodules git@github.com:armbrusl/topopt3d.git && cd topopt3d
+pixi install --manifest-path vendor/jNO/pyproject.toml -e fem
+sbatch cluster/h200.sbatch                            # SOLVER=cudss, HMESH=0.10, PSTAR=0 (probe)
+PSTAR=<0.76*P> BUDGET=3000 TAG=h200 sbatch cluster/h200.sbatch
 ```
 
 Try **`SOLVER=cudss` first** — see *Cost* below for why. If it is unavailable or misbehaves,
 `SOLVER=""` uses the default backend, which always works.
 
+## The pinned jNO branch
 
-## Requires jNO from an unmerged branch
-
-The tetrahedral half of this does not exist on jNO `main`. It needs branch **`feat/topopt-3d`**,
-which adds:
+`vendor/jNO` is pinned to an exact commit on **`feat/topopt-3d`**, which is not merged to jNO `main`
+and carries two prerequisites beneath it (`feat/p-adaptivity` -> `feat/fem-functional`). It provides
+the tetrahedral half of the method:
 
 | what | why it is needed |
 |---|---|
-| `domain.patch_filter()` over **edge fans** | eq. (17)-(19) on tets — see *Why edges* below |
+| `domain.patch_filter()` over **edge fans** | eq. (17)-(19) on tets — see *Why edge fans* below |
 | `domain.cell_angles()` returning **6 dihedrals** on tets | the 3-D mesh-quality constraint |
 | `domain.transfer_cell_field()` on tets | the reanalysis, i.e. the honesty check |
 | `domain._interior_facets()` | the perimeter functional, an **area** in 3-D |
 | `expr.integrate(fem, solver=...)` | choosing the linear backend at all |
 
-```bash
-git clone -b feat/topopt-3d git@github.com:FhG-IISB/jNO.git jNO
-cd jNO && pixi install -e fem
-```
-
-The branch is pushed and sits on two prerequisites, so cloning it gets all three:
-`feat/p-adaptivity` (the interpolation-cover element) -> `feat/fem-functional`
-(`expr.integrate(fem)`) -> `feat/topopt-3d`. None is merged to `main` yet.
+To move to a newer jNO: `cd vendor/jNO && git pull && cd - && git add vendor/jNO && git commit`.
 
 ## Why edge fans and not vertex patches
 

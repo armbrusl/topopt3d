@@ -6,9 +6,9 @@
 #SBATCH --output=topopt3d-%j.out
 set -euo pipefail
 
-# jNO must be the feat/topopt-3d branch -- the tetrahedral patch filter, the 3-D cell_angles and
-# integrate(solver=) are not on main. See README.
-export JNO_DIR="${JNO_DIR:?set JNO_DIR to the jNO checkout}"
+# jNO ships as a pinned submodule at vendor/jNO (branch feat/topopt-3d). The tetrahedral patch
+# filter, the 3-D cell_angles and integrate(solver=) are not on jNO main. See README.
+export JNO_DIR="${JNO_DIR:-${SLURM_SUBMIT_DIR}/vendor/jNO}"   # the pinned submodule
 
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-16}"
 export JAX_PLATFORMS=cuda,cpu
@@ -26,5 +26,5 @@ export PENALP=0                     # SIMP continuation NaNs with the patch filt
 export MOVING="${MOVING:-1}"
 export TAG="${TAG:-h200}"
 
-cd "$JNO_DIR"
-pixi run -e fem python "${SLURM_SUBMIT_DIR}/scripts/run.py"
+cd "${SLURM_SUBMIT_DIR}"
+pixi run --manifest-path "$JNO_DIR/pyproject.toml" -e fem python scripts/run.py

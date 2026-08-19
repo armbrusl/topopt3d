@@ -1,0 +1,4 @@
+[submodule "vendor/jNO"]
+	path = vendor/jNO
+	url = git@github.com:FhG-IISB/jNO.git
+	branch = feat/topopt-3d

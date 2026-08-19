@@ -42,12 +42,13 @@ moved = np.linalg.norm(pts_f - pts0, axis=1)
 print(f"aspect [{aspect.min():.2f},{aspect.max():.2f}]  min dihedral {dihed.min():.2f} deg  "
       f"min |K| {cvol.min():.3e}  max node move {moved.max():.4f}")
 
+STRIDE = int(os.environ.get("FRAME_STRIDE", "1"))
 r = lambda a, n: np.round(np.asarray(a, float), n).tolist()  # noqa: E731
 
 data = {
     "meta": {
         "L": L, "H": H, "W": W, "h": h, "volfrac": float(os.environ.get("VOLFRAC", "0.20")), "penal": 3.0,
-        "nt": int(cells.shape[0]), "nn": int(pts0.shape[0]), "nf": int(fr_rho.shape[0]),
+        "nt": int(cells.shape[0]), "nn": int(pts0.shape[0]), "nf": int(len(fr_rho[::STRIDE])),
         "iters": int(run["it"][-1]),
         "C0": float(run["C"][0]), "C1": float(run["C"][-1]),
         "V1": float(run["V"][-1]), "mnd": float(run["mnd"][-1]),
@@ -58,7 +59,11 @@ data = {
     "pts": r(pts_f.ravel(), 5),
     "pts0": r(pts0.ravel(), 5),
     # per-frame: node positions + densities, so the slider drives geometry AND design
-    "frames": {"rho": [r(f, 4) for f in fr_rho], "pts": [r(f.ravel(), 5) for f in fr_pts]},
+    # Frame payload dominates the file, and the artifact host caps a page at 16 MB. Stride the
+    # frames and round harder: the density is what animates, and the mesh motion is bounded by the
+    # per-node box (measured max |dx| = 0.048 here, about half an element), so 4 dp on coordinates
+    # and 3 on density are both well below anything visible at screen resolution.
+    "frames": {"rho": [r(f, 3) for f in fr_rho[::STRIDE]], "pts": [r(f.ravel(), 4) for f in fr_pts[::STRIDE]]},
     # per-tet scalar fields on the final configuration
     "fields": {
         "rho": r(rho_f, 4),

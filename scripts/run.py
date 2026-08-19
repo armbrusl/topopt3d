@@ -51,7 +51,7 @@ NT = cells.shape[0]
 # Echo the RESOLVED configuration, loudly. Every knob is an env var, so a missing shell space --
 # `CUDA_VISIBLE_DEVICES=1HMESH=0.17` sets neither -- silently runs a different problem than intended.
 # Observed: that exact typo ran 64,816 tets instead of 14,063 and nobody noticed for 14 minutes.
-_cfg = dict(HMESH=H_MESH, tets=NT, dofs=3 * pts0.shape[0], SOLVER=os.environ.get("SOLVER", "<default>") or "<default>",
+_cfg = dict(HMESH=H_MESH, tets=NT, dofs=3 * pts0.shape[0], SOLVER=(os.environ.get("SOLVER", "custom") or "<jNO default>"),
             PSTAR=PSTAR, BUDGET=BUDGET, MOVING=os.environ.get("MOVING", "1"),
             PENALP=os.environ.get("PENALP", "1"), BETA_H=os.environ.get("BETA_H", "0"), TAG=TAG)
 print("=" * 78, flush=True)

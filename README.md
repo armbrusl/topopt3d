@@ -193,3 +193,32 @@ All via environment, so a cluster job needs no edits:
 * The renderer reports **line pinches** — surface edges carrying more than one sheet — straight off
   the design. That is the diagnostic that says whether 3-D pinching happens often enough to justify
   a vertex criterion at all.
+
+## A long fine run on another machine
+
+```bash
+bash cluster/bracket_fine.sh                     # h=0.05 (~450k tets), 140 iterations, 10 h ceiling
+HMESH=0.07 HOURS=6 bash cluster/bracket_fine.sh  # smaller, if memory binds
+```
+
+Two phases, because one setting cannot be carried over from a coarser mesh. The perimeter
+functional sums the density jump across every interior facet weighted by its **area** in 3-D, and
+its natural value GROWS with refinement -- measured 51 at `h=0.15` and 65 at `h=0.10` on the same
+bracket, because a finer mesh resolves finer features. So the script **probes** for the natural
+perimeter at the chosen resolution and sets `PSTAR` to a fraction of it, rather than copying a
+number that would silently over-constrain.
+
+It checkpoints every chunk, so a wall-clock stop, a queue kill or a crash still leaves a usable
+design and its full history in `runs/topo3d_<TAG>.npz`.
+
+**Sizing.** Measured on an i5-13600K over 250 iterations: 16,691 tets took 9.0 min and 52,967 took
+25.9 min (2.16 and 6.22 s/iteration). Extrapolating linearly puts `h=0.05` at ~50 s/iteration, about
+2 h for 140 -- treat that as a **floor**. A sparse direct factorisation on a 3-D mesh fills in faster
+than linearly and the `h=0.10` run already came in 60 % above the linear prediction. Memory binds
+before wall clock: at ~285k DOFs the factor is several GB. On a GPU node prefer `SOLVER=cudss`,
+which is this problem's ideal case -- the sparsity pattern is identical at every iteration, so the
+symbolic plan is computed once.
+
+**140 iterations is enough** on this problem: compliance was flat from about iteration 120 at
+`h=0.10`. The Heaviside projection ramps to `BETA_H` at `BETA_AT` (default 0.8) of *the run*, so a
+shorter budget still projects fully rather than stopping half-projected.

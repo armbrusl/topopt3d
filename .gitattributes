@@ -1,0 +1,19 @@
+# Line endings are NOT a style question here: a shell script checked out with CRLF fails at its
+# first line, because `set -euo pipefail\r` makes bash reject `pipefail` as an invalid option name
+# -- and the carriage return then mangles the error message itself, so it does not even read as a
+# line-ending problem. Seen on a machine with core.autocrlf=true; the committed blobs were clean LF.
+#
+# `eol=lf` pins the WORKING TREE, so it holds regardless of the cloning machine's autocrlf setting.
+* text=auto eol=lf
+
+*.sh       text eol=lf
+*.sbatch   text eol=lf
+*.py       text eol=lf
+*.md       text eol=lf
+*.toml     text eol=lf
+*.html     text eol=lf
+
+*.npz  binary
+*.png  binary
+*.gif  binary
+*.json binary

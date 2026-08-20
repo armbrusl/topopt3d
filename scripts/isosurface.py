@@ -79,18 +79,82 @@ def marching_tets(cells, pts, phi, level):
     return np.array(tris) if tris else np.zeros((0, 3, 3))
 
 
-def draw(ax, tri, *, az=-0.72, el=0.42, lw=0.0):
-    """Same projection / painter sort / screen-space Lambert as the console."""
+def weld(tri, tol=9):
+    """Weld the triangle soup into a shared-vertex mesh. Returns (verts, faces).
+
+    Marching tets emits each triangle independently, so a vertex shared by several triangles exists
+    several times over and there is no connectivity to average a normal across. Rounding to `tol`
+    decimals is safe here because the crossing points are computed from the same edge endpoints by
+    the same interpolation, so shared vertices agree to far better than that.
+    """
+    flat = tri.reshape(-1, 3)
+    key = np.round(flat, tol)
+    _, first, inv = np.unique(key, axis=0, return_index=True, return_inverse=True)
+    return flat[first], np.asarray(inv).reshape(-1, 3)
+
+
+def vertex_normals(verts, faces):
+    """Area-weighted vertex normals. The cross product is not normalised before accumulation, so a
+    big triangle counts for more than a sliver -- which is what makes the result stable on the very
+    uneven triangles marching tets produces."""
+    v = verts[faces]
+    fn = np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0])
+    out = np.zeros_like(verts)
+    for k in range(3):
+        np.add.at(out, faces[:, k], fn)
+    n = np.linalg.norm(out, axis=1, keepdims=True)
+    return out / np.maximum(n, 1e-300)
+
+
+def taubin(verts, faces, iters=8, lam=0.55, mu=-0.58):
+    """Taubin lambda|mu smoothing of the SURFACE, not the data.
+
+    A shrink pass followed by an inflate pass, which is why it does not collapse the shape the way
+    repeated Laplacian smoothing does. It moves the extracted vertices only -- the density field,
+    the compliance and every number reported elsewhere are untouched -- so it is a presentation
+    step, and one worth naming in a caption.
+    """
+    nb = [[] for _ in range(len(verts))]
+    for f in faces:
+        for a in range(3):
+            nb[f[a]].append(f[(a + 1) % 3])
+            nb[f[a]].append(f[(a + 2) % 3])
+    idx = [np.unique(x) for x in nb]
+    V = verts.copy()
+    for _ in range(iters):
+        for step in (lam, mu):
+            avg = np.array([V[i].mean(axis=0) if len(i) else np.zeros(3) for i in idx])
+            V = V + step * (avg - V)
+    return V
+
+
+def draw(ax, tri, *, az=-0.72, el=0.42, lw=0.0, smooth=False, vn=None):
+    """Same projection / painter sort / screen-space Lambert as the console.
+
+    ``smooth`` shades each face from the mean of its three VERTEX normals instead of its own face
+    normal. The geometry is identical -- this only changes the shading -- but it removes the
+    faceting that makes an unstructured triangulation read as grainy at any resolution.
+    """
     ca, sa, ce, se = np.cos(az), np.sin(az), np.cos(el), np.sin(el)
     w = tri - np.array([L / 2, H / 2, W / 2])
     X = w[..., 0] * ca + w[..., 2] * sa
     Z = -w[..., 0] * sa + w[..., 2] * ca
     Q = np.stack([X, w[..., 1] * ce - Z * se, w[..., 1] * se + Z * ce], axis=-1)
-    Q = Q[np.argsort(Q[:, :, 2].mean(axis=1))]
+    order = np.argsort(Q[:, :, 2].mean(axis=1))
+    Q = Q[order]
     A, B, C = Q[:, 0], Q[:, 1], Q[:, 2]
     n = np.cross(B - A, C - A)
     nl = np.linalg.norm(n, axis=1)
     nl[nl == 0] = 1.0
+    if smooth and vn is not None:
+        # rotate the vertex normals into the same camera frame the faces were projected into
+        ca2, sa2, ce2, se2 = np.cos(az), np.sin(az), np.cos(el), np.sin(el)
+        NX = vn[..., 0] * ca2 + vn[..., 2] * sa2
+        NZ = -vn[..., 0] * sa2 + vn[..., 2] * ca2
+        nsm = np.stack([NX, vn[..., 1] * ce2 - NZ * se2, vn[..., 1] * se2 + NZ * ce2], axis=-1)
+        n = nsm.mean(axis=1)[order]
+        nl = np.linalg.norm(n, axis=1)
+        nl[nl == 0] = 1.0
     lam = np.clip(np.abs(n @ np.array([0.34, 0.60, 0.72]) / nl) * 0.8 + 0.34, 0.3, 1.0)[:, None]
     rgb = np.repeat(ACCENT[None, :], len(Q), axis=0) * lam
     ax.add_collection(PolyCollection(Q[:, :, :2], facecolors=rgb, edgecolors=rgb, linewidths=lw))
@@ -170,10 +234,18 @@ if __name__ == "__main__":
     print(f"tets={len(cells)}  per-element faces={len(ele)}  "
           f"marching-tets triangles={len(tri)} (of which {len(cap)} boundary caps)")
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 3.6))
+    verts, faces = weld(tri)
+    vn = vertex_normals(verts, faces)
+    smoothV = taubin(verts, faces, iters=int(os.environ.get("TAUBIN", "8")))
+    vn_s = vertex_normals(smoothV, faces)
+    print(f"welded to {len(verts)} vertices / {len(faces)} faces")
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 3.6))
     draw(axes[0], ele, lw=0.25)
-    axes[0].set_title("per-element: whole tet faces above $\\bar\\rho=0.5$")
-    draw(axes[1], tri)
-    axes[1].set_title("marching tets: the $\\bar\\rho=0.5$ level set, cut through elements")
+    axes[0].set_title("per-element\nwhole tet faces above $\\bar\\rho=0.5$")
+    draw(axes[1], verts[faces], smooth=True, vn=vn[faces])
+    axes[1].set_title("marching tets + smooth normals\nsame geometry, shading only")
+    draw(axes[2], smoothV[faces], smooth=True, vn=vn_s[faces])
+    axes[2].set_title("+ Taubin surface smoothing\npresentation step, data untouched")
     fig.savefig(os.path.join(OUT, "topo3d_isosurface.png"))
     print("wrote topo3d_isosurface.png")

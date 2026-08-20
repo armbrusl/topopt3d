@@ -40,7 +40,13 @@ L, H, W = 4.0, 2.0, 2.0
 E0, EMIN, NU, PENAL, VOLFRAC = 1.0, 1e-4, 0.3, 3.0, 0.20
 LAM, MU = E0 * NU / ((1 + NU) * (1 - 2 * NU)), E0 / (2 * (1 + NU))
 THETA_MIN, ASPECT_MAX, PN, TOL = np.deg2rad(5.0), 8.0, 50.0, 1e-9
-MOVE_BOUND = 0.30 * H_MESH
+# The paper's mechanism is that nodes MIGRATE TO THE MATERIAL BOUNDARY, so the bound on how far
+# they may travel is not a safety knob -- it is the method's resolution. The 2-D tutorial uses
+# 2.0*h; this was 0.30*h, i.e. 6.7x tighter, and measurably throttled: at 80,716 tets the median
+# interior node had used 64 % of its allowance and the top decile was pinned against it, while
+# nodes near the rho=0.5 interface still moved 1.37x further than nodes deep in void or solid --
+# the mechanism working, against a wall.
+MOVE_BOUND = float(os.environ.get("MOVE_BOUND_FRAC", "2.0")) * H_MESH
 SPAN = 0.6                                                 # loaded band; also the solid pmask depth
 BETA, GAMMA, BETA_MIN = 2e-4, 0.997, 1e-4
 

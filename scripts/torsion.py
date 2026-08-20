@@ -241,18 +241,10 @@ def checkpoint():
     os.replace(tmp, DST)
 
 
-it, t0 = 0, time.time()
-while time.time() - t0 < BUDGET and it < ITERS:
-    crux.solve(CHUNK, callbacks=callbacks)
-    it += CHUNK
-    if BETA_H > 0:
-        # Tied to a FRACTION OF THE RUN, not to a fixed per-iteration rate and not to how the
-        # run is chunked. A fixed rate silently couples the projection to the iteration budget:
-        # 1.10 per 10 iterations reaches beta = 10.8 by iteration 250 but only 3.8 by 140, so a
-        # shorter run is not the same optimisation stopped early -- it is a different one, barely
-        # projected. Ramping once per `crux.solve()` call was worse still and made CHUNK a physics
-        # knob (beta 10.8 at CHUNK=10 against 1.6 at CHUNK=50, M_nd 0.008 against 0.078).
-        _beta_now[0] = min(BETA_H, float(BETA_H) ** min(1.0, it / max(BETA_AT * ITERS, 1.0)))
+def record(it_now):
+    """Snapshot the design, the mesh and the history at ``it_now``, and checkpoint."""
+    global it
+    it = it_now
     r = np.asarray(crux.eval([rho])).reshape(-1)
     p = pts0.copy()
     for sp, node in zip(coord_specs, coord_nodes):
@@ -267,6 +259,22 @@ while time.time() - t0 < BUDGET and it < ITERS:
           f"M_nd={hist['mnd'][-1]:.4f}  beta_H={_beta_now[0]:.1f}  g_ang={hist['ang'][-1]:.3f} "
           f"asp={hist['asp'][-1]:.3f} vmx={hist['vmx'][-1]:.3f}  ({time.time() - t0:.0f}s)", flush=True)
     checkpoint()
+
+
+it, t0 = 0, time.time()
+record(0)
+while time.time() - t0 < BUDGET and it < ITERS:
+    if BETA_H > 0:
+        # Tied to a FRACTION OF THE RUN, not to a fixed per-iteration rate and not to how the
+        # run is chunked. A fixed rate silently couples the projection to the iteration budget:
+        # 1.10 per 10 iterations reaches beta = 10.8 by iteration 250 but only 3.8 by 140, so a
+        # shorter run is not the same optimisation stopped early -- it is a different one, barely
+        # projected. Ramping once per `crux.solve()` call was worse still and made CHUNK a physics
+        # knob (beta 10.8 at CHUNK=10 against 1.6 at CHUNK=50, M_nd 0.008 against 0.078).
+        _beta_now[0] = min(BETA_H, float(BETA_H) ** min(1.0, it / max(BETA_AT * ITERS, 1.0)))
+    crux.solve(CHUNK, callbacks=callbacks)
+    record(it + CHUNK)
+
 
 print(f"saved topo3d_{TAG}.npz  ({len(frames_rho)} frames, {it} iterations, {(time.time() - t0) / 60:.1f} min)",
       flush=True)

@@ -84,6 +84,24 @@ input[type=range]{width:100%;accent-color:var(--accent);margin:.3em 0}
       <div class="kv"><span>solid tets</span><b id="nsolid">–</b></div>
       <div class="kv"><span>surface faces</span><b id="nface">–</b></div>
     </section>
+    <section><h2>Cut-away</h2>
+      <div class="row"><button class="btn" id="cx" aria-pressed="true">x</button>
+        <button class="btn" id="cy" aria-pressed="false">y</button>
+        <button class="btn" id="cz" aria-pressed="false">z</button>
+        <button class="btn" id="cflip" aria-pressed="false">flip</button></div>
+      <input type="range" id="clip" min="0" max="1" value="1" step="0.005">
+      <div class="kv"><span id="cliplab">no cut</span><b id="clipv">–</b></div>
+      <div class="note">Cells past the plane are dropped before the surface is extracted, so the
+        interior faces they were hiding become boundary — a real cut-away, not a clipped picture.</div>
+    </section>
+    <section><h2>Loads &amp; supports</h2>
+      <div class="row"><button class="btn" id="bbc" aria-pressed="true">show</button>
+        <button class="btn" id="bnd" aria-pressed="false">non-design</button></div>
+      <div class="kv"><span>loaded nodes</span><b id="nload">–</b></div>
+      <div class="kv"><span>fixed nodes</span><b id="nfix">–</b></div>
+      <div class="note">Arrows are the ASSEMBLED right-hand side per node, direction and relative
+        magnitude; squares are constrained nodes. Both come from the operator, not the predicates.</div>
+    </section>
     <section><h2>Mesh</h2>
       <div class="row"><button class="btn" id="bdef" aria-pressed="true">deformed</button>
         <button class="btn" id="bund" aria-pressed="false">undeformed</button></div>
@@ -123,6 +141,8 @@ const HOME = (M.W < 0.2 * Math.min(M.L, M.H)) ? {az: 0, el: 0} : {az: -0.72, el:
 let rot = {...HOME}, zoom = 1, pan = {x: 0, y: 0};
 let frame = NF - 1, thr = 0.5, field = "rho", deformed = true, playing = null;
 let proj = null;
+let clipAxis = 0, clipAt = 1, clipFlip = false, showBC = true, showND = false;
+const BC = D.bc || null, ND = D.nondesign || null;
 
 const FIELDS = {
   rho:    {label: "ρ̄  physical density", unit: "–",     kind: "seq", finalOnly: false},
@@ -151,11 +171,27 @@ function faceValue(t, nodes){
 
 // ---- the iso-surface: faces of solid tets used exactly once
 const LF = [[0,1,2],[0,1,3],[0,2,3],[1,2,3]];
+
+// Cell centroids on the UNDEFORMED mesh: the cut plane should stay put as the design evolves and
+// the nodes migrate, otherwise the slice wanders and frames cannot be compared.
+const CEN = (() => {
+  const c = new Float64Array(NT*3), p = D.pts0;
+  for(let t=0;t<NT;t++) for(let k=0;k<4;k++){ const n=CELLS[4*t+k];
+    c[3*t]+=p[3*n]/4; c[3*t+1]+=p[3*n+1]/4; c[3*t+2]+=p[3*n+2]/4; }
+  return c;
+})();
+const EXT = [M.L, M.H, M.W];
+
 function surface(rho, level){
   const seen = new Map();
   let nsolid = 0;
+  const cut = clipAt < 1 ? clipAt*EXT[clipAxis] : Infinity;
   for(let t=0; t<NT; t++){
     if(rho[t] <= level) continue;
+    // Drop the cell BEFORE extraction. A face shared by two solid cells is skipped as interior; once
+    // one of the pair is gone the face is used exactly once and becomes surface, which is what
+    // exposes the inside. Clipping the drawn triangles instead would only hide them.
+    if(cut < Infinity){ const v = CEN[3*t+clipAxis]; if(clipFlip ? v < EXT[clipAxis]-cut : v > cut) continue; }
     nsolid++;
     const c0=CELLS[4*t], c1=CELLS[4*t+1], c2=CELLS[4*t+2], c3=CELLS[4*t+3];
     const c=[c0,c1,c2,c3];
@@ -188,7 +224,7 @@ function project(pts, faces){
   for(const f of faces){
     const p=[P(f.n[0]),P(f.n[1]),P(f.n[2])];
     for(const q of p){ if(q[0]<x0)x0=q[0]; if(q[0]>x1)x1=q[0]; if(q[1]<y0)y0=q[1]; if(q[1]>y1)y1=q[1]; }
-    items.push({pts:p, d:(p[0][2]+p[1][2]+p[2][2])/3, v:faceValue(f.t, f.n)});
+    items.push({pts:p, d:(p[0][2]+p[1][2]+p[2][2])/3, v:faceValue(f.t, f.n), t:f.t});
   }
   items.sort((a,b)=>a.d-b.d);                  // painter's: far first
   return {items, x0, x1, y0, y1};
@@ -249,8 +285,14 @@ function drawScene(){
     const col=`rgb(${Math.round(r*lam)},${Math.round(g*lam)},${Math.round(b*lam)})`;
     gs.beginPath(); gs.moveTo(px(A),py(A)); gs.lineTo(px(B),py(B)); gs.lineTo(px(Cq),py(Cq)); gs.closePath();
     gs.fillStyle=col; gs.fill();
-    gs.strokeStyle=col; gs.lineWidth=lw; gs.stroke();   // close hairline seams between faces
+    if(window.__ND && window.__ND.has(it.t)){
+      gs.strokeStyle="#0D9488"; gs.lineWidth=Math.max(lw, H*0.0012);   // frozen by the formulation
+    } else {
+      gs.strokeStyle=col; gs.lineWidth=lw;              // close hairline seams between faces
+    }
+    gs.stroke();
   }
+  drawBC(px, py, sc, pts);
   drawTriad(W,H);
   const fmt = v => Math.abs(v)>=100?v.toFixed(0):(Math.abs(v)>=1?v.toFixed(2):v.toFixed(3));
   document.getElementById("cbhi").textContent = fmt(hi);
@@ -258,6 +300,41 @@ function drawScene(){
   document.getElementById("cbunit").textContent = FIELDS[field].unit === "–" ? "" : FIELDS[field].unit;
   const stops=[]; for(let i=0;i<=10;i++){ const [r,g,b]=ramp(i/10,tbl); stops.push(`rgb(${r|0},${g|0},${b|0}) ${i*10}%`); }
   document.getElementById("cbstrip").style.background = `linear-gradient(to top, ${stops.join(",")})`;
+}
+// ---- loads and supports, drawn from the assembled right-hand side
+function drawBC(px, py, sc, pts){
+  if(!BC || !showBC) return;
+  const ca=Math.cos(rot.az), sa=Math.sin(rot.az), ce=Math.cos(rot.el), se=Math.sin(rot.el);
+  const cx=M.L/2, cy=M.H/2, cz=M.W/2;
+  // The SAME yaw-then-pitch as project(); a marker drawn with its own transform drifts off the
+  // geometry the moment the camera moves, which is worse than not drawing it.
+  const P = (wx,wy,wz) => { const X=(wx-cx)*ca+(wz-cz)*sa, Z=-(wx-cx)*sa+(wz-cz)*ca;
+                            return [X, (wy-cy)*ce-Z*se, (wy-cy)*se+Z*ce]; };
+  const V = (vx,vy,vz) => { const X=vx*ca+vz*sa, Z=-vx*sa+vz*ca; return [X, vy*ce-Z*se]; };
+
+  gs.fillStyle = "#1A202C";
+  for(const n of BC.fixed){
+    const q = P(pts[3*n], pts[3*n+1], pts[3*n+2]);
+    const s = Math.max(1.6, sc*0.012);
+    gs.fillRect(px(q)-s, py(q)-s, 2*s, 2*s);
+  }
+  const arrow = Math.max(M.L, M.H, M.W) * 0.13;
+  gs.strokeStyle = "#CB3F3F"; gs.fillStyle = "#CB3F3F";
+  gs.lineWidth = Math.max(1.0, sc*0.006);
+  for(let i=0;i<BC.load.length;i++){
+    const e = BC.load[i], n = e[0];
+    const rel = BC.scale ? BC.scale[i] : 1;
+    const len = arrow * (0.45 + 0.55*rel);       // relative magnitude, floored so none vanishes
+    const q = P(pts[3*n], pts[3*n+1], pts[3*n+2]);
+    const d = V(e[1], e[2], e[3]);
+    const x0 = px(q), y0 = py(q), x1 = x0 + d[0]*len*sc, y1 = y0 - d[1]*len*sc;
+    gs.beginPath(); gs.moveTo(x0,y0); gs.lineTo(x1,y1); gs.stroke();
+    const a = Math.atan2(y1-y0, x1-x0), hs = Math.max(3, sc*0.02);
+    gs.beginPath(); gs.moveTo(x1,y1);
+    gs.lineTo(x1-hs*Math.cos(a-0.4), y1-hs*Math.sin(a-0.4));
+    gs.lineTo(x1-hs*Math.cos(a+0.4), y1-hs*Math.sin(a+0.4));
+    gs.closePath(); gs.fill();
+  }
 }
 function drawTriad(W,H){
   const ca=Math.cos(rot.az), sa=Math.sin(rot.az), ce=Math.cos(rot.el), se=Math.sin(rot.el);
@@ -344,6 +421,52 @@ Object.entries(FIELDS).forEach(([k,f])=>{
   };
   frow.appendChild(b);
 });
+// ---- cut-away
+const AXN = ["x","y","z"];
+const clipEl = document.getElementById("clip");
+function clipLabel(){
+  const at = clipAt >= 1;
+  document.getElementById("cliplab").textContent = at ? "no cut"
+    : `keep ${AXN[clipAxis]} ${clipFlip ? ">" : "<"}`;
+  document.getElementById("clipv").textContent = at ? "–" : (clipAt*EXT[clipAxis]).toFixed(2);
+}
+clipEl.oninput = () => { clipAt = +clipEl.value; clipLabel(); redraw(); };
+["cx","cy","cz"].forEach((id,i)=>{
+  document.getElementById(id).onclick = () => {
+    clipAxis = i;
+    ["cx","cy","cz"].forEach((j,k)=>document.getElementById(j).setAttribute("aria-pressed", k===i));
+    clipLabel(); redraw();
+  };
+});
+document.getElementById("cflip").onclick = e => {
+  clipFlip = !clipFlip; e.currentTarget.setAttribute("aria-pressed", clipFlip); clipLabel(); redraw();
+};
+clipLabel();
+
+// ---- loads and supports
+const bbc = document.getElementById("bbc");
+if(BC){
+  document.getElementById("nload").textContent = BC.load.length;
+  document.getElementById("nfix").textContent = BC.fixed.length;
+  bbc.onclick = () => { showBC = !showBC; bbc.setAttribute("aria-pressed", showBC); drawScene(); };
+} else {
+  bbc.disabled = true; bbc.setAttribute("aria-pressed", false);
+  document.getElementById("nload").textContent = "not recorded";
+  document.getElementById("nfix").textContent = "not recorded";
+}
+const bnd = document.getElementById("bnd");
+if(ND && ND.length){
+  const NDSET = new Set(ND);
+  bnd.onclick = () => {
+    showND = !showND; bnd.setAttribute("aria-pressed", showND);
+    // Non-design cells are frozen solid by the formulation, so showing them alone answers "is that
+    // structure, or is it the region I told the optimiser it could not touch?"
+    FIELDS.rho.label = showND ? "ρ̄  (non-design ringed)" : "ρ̄  physical density";
+    window.__ND = showND ? NDSET : null;
+    redraw();
+  };
+} else { bnd.disabled = true; }
+
 const itEl=document.getElementById("it");
 itEl.max=NF-1; itEl.value=NF-1;
 itEl.oninput=()=>{ frame=+itEl.value; redraw(); };

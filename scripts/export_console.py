@@ -79,6 +79,26 @@ data = {
     "hist": {k: r(run[k], 6) for k in ("it", "C", "V", "mnd", "ang", "asp")},
 }
 
+# --- boundary conditions, if the run recorded them ---------------------------------------------
+# Taken from the ASSEMBLED right-hand side and the constrained node set, so the console draws what
+# the operator carries rather than what the predicates say. Loaded nodes are sent with their force
+# vector; a node with no entry in `b` simply is not loaded, whatever the region predicate claimed.
+if "load_f" in run.files:
+    lf = np.asarray(run["load_f"], float)
+    mag = np.linalg.norm(lf, axis=1)
+    live = np.flatnonzero(mag > 1e-12)
+    data["bc"] = {
+        # UNIT direction per node; the relative magnitude rides in `scale` and the template applies
+        # it once. Normalising the vector by the global max instead would apply magnitude twice.
+        "load": [[int(n)] + r(lf[n] / mag[n], 4) for n in live],
+        "fixed": np.flatnonzero(np.asarray(run["fixed"])).astype(int).tolist() if "fixed" in run.files else [],
+        "fmax": float(mag.max()),
+        "scale": [r(mag[n] / max(mag.max(), 1e-300), 3) for n in live],
+    }
+    print(f"bc: {len(live)} loaded nodes, {len(data['bc']['fixed'])} fixed nodes")
+if "solid" in run.files:
+    data["nondesign"] = np.flatnonzero(np.asarray(run["solid"])).astype(int).tolist()
+
 blob = json.dumps(data, separators=(",", ":"))
 # TAG keeps a pseudo-2D console from overwriting the 3-D one; both are worth keeping side by side.
 TAG = os.environ.get("TAG", "")

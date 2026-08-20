@@ -210,11 +210,31 @@ ev = lambda n: float(np.asarray(crux.eval([n])).reshape(-1)[0])  # noqa: E731
 DST = os.path.join(OUT, f"topo3d_{TAG}.npz")
 
 
+# The boundary conditions as the SOLVER sees them, not as the predicates describe them: `load_f` is
+# the assembled right-hand side per node, so anything drawn from it is what the operator actually
+# carries. Both bugs on this problem -- a reserved tag overriding a predicate, and an unbalanced
+# couple -- were invisible in the predicates and obvious in the assembled vector.
+fixed_nodes = np.asarray(pts0[:, 0] < TOL)
+
+# BC_ONLY adds the boundary conditions to an EXISTING result and exits, for a run that predates this
+# block. It goes through the same setup above rather than a separate script, so the vector written
+# is by construction the one the optimisation used.
+if os.environ.get("BC_ONLY") == "1":
+    _dst = os.path.join(OUT, f"topo3d_{TAG}.npz")
+    _old = dict(np.load(_dst))
+    assert np.array_equal(_old["cells"], cells), "BC_ONLY: the mesh does not match the saved run"
+    _old.update(load_f=_f, fixed=fixed_nodes, solid=solid)
+    np.savez(_dst, **_old)
+    print(f"BC_ONLY: added load_f/fixed/solid to topo3d_{TAG}.npz", flush=True)
+    raise SystemExit(0)
+
+
 def checkpoint():
     tmp = DST + ".tmp.npz"
     np.savez(tmp, cells=cells, pts0=pts0, pts_f=frames_pts[-1], rho_f=frames_rho[-1],
              frames_rho=np.array(frames_rho), frames_pts=np.array(frames_pts),
-             solid=solid, **{k: np.asarray(v) for k, v in hist.items()})
+             solid=solid, load_f=_f, fixed=fixed_nodes,
+             **{k: np.asarray(v) for k, v in hist.items()})
     os.replace(tmp, DST)
 
 

@@ -20,7 +20,9 @@ run = np.load(os.path.join(OUT, os.environ.get("RUN", "topo3d_final.npz")))
 cells, pts0 = run["cells"], run["pts0"]
 fr_rho, fr_pts = run["frames_rho"], run["frames_pts"]
 NT, NN, NF = cells.shape[0], pts0.shape[0], fr_rho.shape[0]
-L, H, W = 4.0, 2.0, 2.0
+L = float(os.environ.get("LX", "4.0"))
+H = float(os.environ.get("LY", "2.0"))
+W = float(os.environ.get("LZ", "2.0"))
 
 
 def setup_style():
@@ -207,10 +209,11 @@ paths = []
 for i in range(NF):
     fa, ow, _ = surface(fr_rho[i])
     fig, ax = plt.subplots(figsize=(6.2, 3.2))
-    draw(ax, fr_pts[i], fa)
+    draw(ax, fr_pts[i], fa, az=float(os.environ.get('AZ', '-0.72')), el=float(os.environ.get('EL', '0.42')))
     ax.set_title(f"iteration {int(run['it'][i]):3d}   ·   $C$ = {run['C'][i]:7.2f}", fontsize=9)
     # every frame on the SAME screen box, so the structure does not jitter between frames
-    ax.set_xlim(-2.35, 2.35); ax.set_ylim(-1.35, 1.35)
+    _s = max(L, H, W) * 0.62
+    ax.set_xlim(-_s, _s); ax.set_ylim(-_s * 0.55, _s * 0.55)
     p = os.path.join(tmp, f"f{i:03d}.png")
     fig.savefig(p, dpi=110, facecolor="white")
     plt.close(fig)

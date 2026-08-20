@@ -22,7 +22,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.environ.get("OUTDIR") or os.path.join(os.path.dirname(HERE), "runs")
 run = np.load(os.path.join(OUT, os.environ.get("RUN", "topo3d_final.npz")))
 cells, pts, rho = run["cells"], run["pts_f"], run["rho_f"]
-L, H, W = 4.0, 2.0, 2.0
+L = float(os.environ.get("LX", "4.0"))
+H = float(os.environ.get("LY", "2.0"))
+W = float(os.environ.get("LZ", "2.0"))
 LEVEL = float(os.environ.get("LEVEL", "0.5"))
 ACCENT = np.array([13, 148, 136]) / 255.0
 
@@ -241,11 +243,12 @@ if __name__ == "__main__":
     print(f"welded to {len(verts)} vertices / {len(faces)} faces")
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 3.6))
-    draw(axes[0], ele, lw=0.25)
+    draw(axes[0], ele, lw=0.25, az=float(os.environ.get("AZ","-0.72")), el=float(os.environ.get("EL","0.42")))
     axes[0].set_title("per-element\nwhole tet faces above $\\bar\\rho=0.5$")
-    draw(axes[1], verts[faces], smooth=True, vn=vn[faces])
+    _az = float(os.environ.get("AZ", "-0.72")); _el = float(os.environ.get("EL", "0.42"))
+    draw(axes[1], verts[faces], smooth=True, vn=vn[faces], az=_az, el=_el)
     axes[1].set_title("marching tets + smooth normals\nsame geometry, shading only")
-    draw(axes[2], smoothV[faces], smooth=True, vn=vn_s[faces])
+    draw(axes[2], smoothV[faces], smooth=True, vn=vn_s[faces], az=_az, el=_el)
     axes[2].set_title("+ Taubin surface smoothing\npresentation step, data untouched")
     fig.savefig(os.path.join(OUT, "topo3d_isosurface.png"))
     print("wrote topo3d_isosurface.png")

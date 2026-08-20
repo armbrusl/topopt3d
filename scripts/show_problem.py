@@ -16,8 +16,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.environ.get("OUTDIR") or os.path.join(os.path.dirname(HERE), "runs")
 os.makedirs(OUT, exist_ok=True)
 
-L, H, W = 4.0, 2.0, 2.0
-TOL, SPAN = 1e-9, 0.6
+L = float(os.environ.get("LX", "4.0"))
+H = float(os.environ.get("LY", "2.0"))
+W = float(os.environ.get("LZ", "2.0"))
+TOL = 1e-9
+SPAN = float(os.environ.get("SPAN", "0.6"))
+LOAD_AXIS = int(os.environ.get("LOAD_AXIS", "2"))
 h = float(os.environ.get("HMESH", "0.28"))
 ACCENT = np.array([13, 148, 136]) / 255.0
 CLAMP = np.array([26, 32, 44]) / 255.0
@@ -38,7 +42,7 @@ faces = np.array(list(seen.keys()), dtype=int)
 
 # the run's own predicates
 root_n = pts[:, 0] < TOL
-tip_n = (pts[:, 0] > L - TOL) & (pts[:, 2] < SPAN)
+tip_n = (pts[:, 0] > L - TOL) & (pts[:, 1 if LOAD_AXIS == 1 else 2] < SPAN)
 print(f"clamped nodes: {int(root_n.sum())}   loaded nodes: {int(tip_n.sum())}")
 
 # a face belongs to a region when ALL THREE of its nodes do -- the same rule the assembler uses to
@@ -71,7 +75,8 @@ def draw(ax, az, el, title):
                                      edgecolors="#12343B", linewidths=0.18))
     # the load arrow: from the loaded patch centroid, along the applied traction (0, 0, -1)
     c0 = pts[tip_n].mean(axis=0)
-    tip = project(np.stack([c0, c0 + np.array([0.0, 0.0, -1.2])]), az, el)
+    _arrow = np.zeros(3); _arrow[LOAD_AXIS] = -0.12 * max(L, H, W)
+    tip = project(np.stack([c0, c0 + _arrow]), az, el)
     ax.annotate("", xy=tip[1, :2], xytext=tip[0, :2],
                 arrowprops=dict(arrowstyle="-|>", lw=1.8, color="#CB3F3F", shrinkA=0, shrinkB=0))
     lo = Q[:, :, :2].reshape(-1, 2)
@@ -93,7 +98,7 @@ if __name__ == "__main__":
 
     fig, axes = plt.subplots(1, 3, figsize=(13, 3.4))
     draw(axes[0], -0.72, 0.42, "oblique")
-    draw(axes[1], 0.0, 0.0, "side  $x$–$y$   (the load points INTO the page)")
-    draw(axes[2], 0.0, 1.5708, "plan  $x$–$z$   (the bending plane)")
+    draw(axes[1], 0.0, 0.0, "side  $x$–$y$")
+    draw(axes[2], 0.0, 1.5708, "plan  $x$–$z$")
     fig.savefig(os.path.join(OUT, "topo3d_problem.png"))
     print("wrote topo3d_problem.png")

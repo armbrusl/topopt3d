@@ -28,9 +28,12 @@ print(f"tets={cells.shape[0]} nodes={pts0.shape[0]} frames={fr_rho.shape[0]}")
 
 # --- per-tet mesh-quality fields on the FINAL deformed mesh, through jNO's own nodes ----------
 # The mesh must be rebuilt to evaluate the geometry nodes on the deformed configuration, so it has
-# to match the run exactly -- hence HMESH from the environment, the same knob run.py takes. The
-# assertion below is what catches a mismatch instead of silently reporting another mesh's quality.
-L, H, W = 4.0, 2.0, 2.0
+# to match the run exactly -- hence the geometry AND HMESH come from the environment, the same knobs
+# run.py takes. The assertion below is what catches a mismatch instead of silently reporting another
+# mesh's quality; the box used to be hard-coded 4x2x2, which simply refused any pseudo-2D run.
+L = float(os.environ.get("LX", "4.0"))
+H = float(os.environ.get("LY", "2.0"))
+W = float(os.environ.get("LZ", "2.0"))
 h = float(os.environ.get("HMESH", "0.10"))
 d = jno.Shape.box(0, 0, 0, L, H, W, size=h).domain()
 assert np.array_equal(np.asarray(d._cells_p1()), cells), "mesh differs from the run"
@@ -53,7 +56,8 @@ data = {
         "C0": float(run["C"][0]), "C1": float(run["C"][-1]),
         "V1": float(run["V"][-1]), "mnd": float(run["mnd"][-1]),
         "minvol": float(cvol.min()), "mindih": float(dihed.min()), "maxaspect": float(aspect.max()),
-        "maxmove": float(moved.max()), "movebound": 0.30 * h,
+        "maxmove": float(moved.max()),
+        "movebound": float(os.environ.get("MOVE_BOUND_FRAC", "2.0")) * h,
     },
     "cells": cells.astype(int).ravel().tolist(),
     "pts": r(pts_f.ravel(), 5),
@@ -76,13 +80,16 @@ data = {
 }
 
 blob = json.dumps(data, separators=(",", ":"))
-out_json = os.path.join(OUT, "topo3d_web.json")
+# TAG keeps a pseudo-2D console from overwriting the 3-D one; both are worth keeping side by side.
+TAG = os.environ.get("TAG", "")
+_sfx = f"_{TAG}" if TAG else ""
+out_json = os.path.join(OUT, f"topo3d_web{_sfx}.json")
 with open(out_json, "w") as f:
     f.write(blob)
 print(f"wrote {out_json}  ({len(blob) / 1e6:.2f} MB)")
 
 tpl = os.path.join(HERE, "console_template.html")
-dst = os.path.join(OUT, "console.html")
+dst = os.path.join(OUT, f"console{_sfx}.html")
 if os.path.exists(tpl):
     html = open(tpl).read()
     new, n = re.subn(r"const BUILTIN = \{.*?\};\n", "const BUILTIN = " + blob + ";\n", html, count=1, flags=re.S)

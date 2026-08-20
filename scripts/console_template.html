@@ -116,7 +116,11 @@ const CELLS = D.cells;
 const FRAMES_RHO = D.frames.rho, FRAMES_PTS = D.frames.pts;
 
 // ---- state
-let rot = {az: -0.72, el: 0.42}, zoom = 1, pan = {x: 0, y: 0};
+// A pseudo-2D slab (thin in z) is unreadable obliquely -- its two element layers foreshorten into
+// the outline. Open face-on when the domain is thin, obliquely otherwise; orbiting is unrestricted
+// either way, and double-click returns to whichever of the two this run opened at.
+const HOME = (M.W < 0.2 * Math.min(M.L, M.H)) ? {az: 0, el: 0} : {az: -0.72, el: 0.42};
+let rot = {...HOME}, zoom = 1, pan = {x: 0, y: 0};
 let frame = NF - 1, thr = 0.5, field = "rho", deformed = true, playing = null;
 let proj = null;
 
@@ -382,7 +386,7 @@ scene.addEventListener("wheel", e=>{
   zoom=Math.max(0.35, Math.min(14, zoom*Math.exp(-e.deltaY*0.0016)));
   drawScene();
 }, {passive:false});
-scene.addEventListener("dblclick", ()=>{ zoom=1; pan={x:0,y:0}; rot={az:-0.72, el:0.42}; drawScene(); });
+scene.addEventListener("dblclick", ()=>{ zoom=1; pan={x:0,y:0}; rot={...HOME}; drawScene(); });
 window.addEventListener("resize", ()=>{ drawScene(); drawConv(); drawHist(); });
 matchMedia("(prefers-color-scheme:dark)").addEventListener("change", redraw);
 

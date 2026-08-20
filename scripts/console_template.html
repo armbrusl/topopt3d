@@ -104,7 +104,11 @@ input[type=range]{width:100%;accent-color:var(--accent);margin:.3em 0}
     </section>
     <section><h2>Mesh</h2>
       <div class="row"><button class="btn" id="bdef" aria-pressed="true">deformed</button>
-        <button class="btn" id="bund" aria-pressed="false">undeformed</button></div>
+        <button class="btn" id="bund" aria-pressed="false">undeformed</button>
+        <button class="btn" id="bblank" aria-pressed="false">starting blank</button></div>
+      <div class="note">The blank is the surface of the domain the run STARTED from, as a point
+        cloud on the undeformed nodes — so it shows what the optimiser was given to work inside,
+        and how much of it the design gave back.</div>
       <div class="kv"><span>max node move</span><b id="mmove">–</b></div>
       <div class="kv"><span>min |K|</span><b id="mvol">–</b></div>
       <div class="kv"><span>min dihedral</span><b id="mdih">–</b></div>
@@ -141,8 +145,25 @@ const HOME = (M.W < 0.2 * Math.min(M.L, M.H)) ? {az: 0, el: 0} : {az: -0.72, el:
 let rot = {...HOME}, zoom = 1, pan = {x: 0, y: 0};
 let frame = NF - 1, thr = 0.5, field = "rho", deformed = true, playing = null;
 let proj = null;
-let clipAxis = 0, clipAt = 1, clipFlip = false, showBC = true, showND = false;
+let clipAxis = 0, clipAt = 1, clipFlip = false, showBC = true, showND = false, showBlank = false;
 const BC = D.bc || null, ND = D.nondesign || null;
+
+// Nodes on the boundary of the ORIGINAL blank: faces of ALL cells used exactly once. Computed here
+// rather than exported, because it is a property of the mesh the console already has.
+const BLANK = (() => {
+  const seen = new Map();
+  for(let t=0; t<NT; t++){
+    const c=[CELLS[4*t],CELLS[4*t+1],CELLS[4*t+2],CELLS[4*t+3]];
+    for(const f of [[0,1,2],[0,1,3],[0,2,3],[1,2,3]]){
+      const a=[c[f[0]],c[f[1]],c[f[2]]].sort((x,y)=>x-y);
+      const k=(a[0]*NN + a[1])*NN + a[2];
+      if(seen.has(k)) seen.delete(k); else seen.set(k, a);
+    }
+  }
+  const s = new Set();
+  for(const a of seen.values()){ s.add(a[0]); s.add(a[1]); s.add(a[2]); }
+  return Int32Array.from(s);
+})();
 
 const FIELDS = {
   rho:    {label: "ρ̄  physical density", unit: "–",     kind: "seq", finalOnly: false},
@@ -263,11 +284,28 @@ function drawScene(){
   gs.clearRect(0,0,W,H);
   const pts = ptsAt(frame);
   const pr = project(pts, SURF.faces);
+  // The blank is generally LARGER than what survives, so its extent has to join the fit before the
+  // scale is chosen -- otherwise turning it on pushes the envelope off the edge of the canvas.
+  const bl = showBlank ? projectBlank() : null;
+  if(bl){ pr.x0=Math.min(pr.x0,bl.x0); pr.x1=Math.max(pr.x1,bl.x1);
+          pr.y0=Math.min(pr.y0,bl.y0); pr.y1=Math.max(pr.y1,bl.y1); }
   const pad = Math.min(W,H)*0.09;
   const sc = Math.min((W-2*pad)/((pr.x1-pr.x0)||1), (H-2*pad)/((pr.y1-pr.y0)||1))*zoom;
   const px = p => W/2 + pan.x + (p[0]-(pr.x0+pr.x1)/2)*sc;
   const py = p => H/2 + pan.y - (p[1]-(pr.y0+pr.y1)/2)*sc;
   proj = {px, py, items: pr.items};
+
+  // Drawn BEFORE the structure so the design occludes it: the result reads as a ghost envelope the
+  // part sits inside, which is the question being asked -- how much of the blank was given back.
+  if(bl){
+    const dark = matchMedia("(prefers-color-scheme:dark)").matches;
+    gs.fillStyle = dark ? "rgba(148,163,184,0.30)" : "rgba(100,116,139,0.28)";
+    const rad = Math.max(0.7, Math.min(W,H)*0.0016);
+    for(let i=0;i<BLANK.length;i++){
+      const q=[bl.pts[3*i], bl.pts[3*i+1]];
+      gs.beginPath(); gs.arc(px(q), py(q), rad, 0, 6.2832); gs.fill();
+    }
+  }
 
   const [lo,hi] = scaleFor();
   const tbl = field === "rho" ? VIRIDIS : CIVIDIS;
@@ -301,6 +339,22 @@ function drawScene(){
   const stops=[]; for(let i=0;i<=10;i++){ const [r,g,b]=ramp(i/10,tbl); stops.push(`rgb(${r|0},${g|0},${b|0}) ${i*10}%`); }
   document.getElementById("cbstrip").style.background = `linear-gradient(to top, ${stops.join(",")})`;
 }
+// ---- the starting blank, on the UNDEFORMED nodes and the same transform as everything else
+function projectBlank(){
+  const ca=Math.cos(rot.az), sa=Math.sin(rot.az), ce=Math.cos(rot.el), se=Math.sin(rot.el);
+  const cx=M.L/2, cy=M.H/2, cz=M.W/2, p=D.pts0;
+  const out = new Float64Array(BLANK.length*3);
+  let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;
+  for(let i=0;i<BLANK.length;i++){
+    const n=BLANK[i], wx=p[3*n]-cx, wy=p[3*n+1]-cy, wz=p[3*n+2]-cz;
+    const X=wx*ca+wz*sa, Z=-wx*sa+wz*ca;
+    const Y=wy*ce-Z*se;
+    out[3*i]=X; out[3*i+1]=Y; out[3*i+2]=wy*se+Z*ce;
+    if(X<x0)x0=X; if(X>x1)x1=X; if(Y<y0)y0=Y; if(Y>y1)y1=Y;
+  }
+  return {pts:out, x0, x1, y0, y1};
+}
+
 // ---- loads and supports, drawn from the assembled right-hand side
 function drawBC(px, py, sc, pts){
   if(!BC || !showBC) return;
@@ -466,6 +520,11 @@ if(ND && ND.length){
     redraw();
   };
 } else { bnd.disabled = true; }
+
+const bblank = document.getElementById("bblank");
+bblank.onclick = () => {
+  showBlank = !showBlank; bblank.setAttribute("aria-pressed", showBlank); drawScene();
+};
 
 const itEl=document.getElementById("it");
 itEl.max=NF-1; itEl.value=NF-1;

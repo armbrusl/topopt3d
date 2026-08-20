@@ -16,7 +16,6 @@ jax.config.update("jax_enable_x64", True)
 
 import numpy as np  # noqa: E402
 
-import jno  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.environ.get("OUTDIR") or os.path.join(os.path.dirname(HERE), "runs")
@@ -26,21 +25,45 @@ cells, pts0, pts_f, rho_f = (run[k] for k in ("cells", "pts0", "pts_f", "rho_f")
 fr_rho, fr_pts = run["frames_rho"], run["frames_pts"]
 print(f"tets={cells.shape[0]} nodes={pts0.shape[0]} frames={fr_rho.shape[0]}")
 
-# --- per-tet mesh-quality fields on the FINAL deformed mesh, through jNO's own nodes ----------
-# The mesh must be rebuilt to evaluate the geometry nodes on the deformed configuration, so it has
-# to match the run exactly -- hence the geometry AND HMESH come from the environment, the same knobs
-# run.py takes. The assertion below is what catches a mismatch instead of silently reporting another
-# mesh's quality; the box used to be hard-coded 4x2x2, which simply refused any pseudo-2D run.
+# --- per-tet mesh-quality fields on the FINAL deformed mesh -------------------------------------
+# Computed from `cells` and `pts_f` directly rather than by rebuilding the domain and evaluating
+# jNO's geometry nodes. The rebuild had to reproduce the run's geometry exactly, which tied this
+# script to `Shape.box`: it refused a tapered blank with bolt holes outright. The formulas below are
+# the same ones `cell_volume` / `cell_angles` / `cell_aspect` implement for tetrahedra, so nothing is
+# approximated -- and the extents now only set the camera and the cut-away range.
 L = float(os.environ.get("LX", "4.0"))
 H = float(os.environ.get("LY", "2.0"))
 W = float(os.environ.get("LZ", "2.0"))
 h = float(os.environ.get("HMESH", "0.10"))
-d = jno.Shape.box(0, 0, 0, L, H, W, size=h).domain()
-assert np.array_equal(np.asarray(d._cells_p1()), cells), "mesh differs from the run"
-d.mesh.points[:, :3] = pts_f  # evaluate the geometry nodes ON the deformed configuration
-aspect = np.asarray(d.cell_aspect().eval()).reshape(-1)
-dihed = np.degrees(np.asarray(d.cell_angles().eval()))  # (n_cells, 6)
-cvol = np.asarray(d.cell_volume().eval()).reshape(-1)
+_v = pts_f[cells]                                            # (n_cells, 4, 3)
+cvol = np.abs(np.linalg.det(np.stack([_v[:, i + 1] - _v[:, 0] for i in range(3)], -1))) / 6.0
+
+
+def _inward_normal(k):
+    keep = [i for i in range(4) if i != k]
+    n = np.cross(_v[:, keep[1]] - _v[:, keep[0]], _v[:, keep[2]] - _v[:, keep[0]])
+    n = n / (np.linalg.norm(n, axis=-1, keepdims=True) + 1e-30)
+    s = np.sign(np.sum(n * (_v[:, k] - _v[:, keep[0]]), axis=-1, keepdims=True))
+    return n * np.where(s == 0.0, 1.0, s)
+
+
+_nrm = [_inward_normal(k) for k in range(4)]
+# The dihedral across edge (i, j) is pi minus the angle between the inward normals of the two faces
+# that omit the OTHER two vertices -- the same pairing `cell_angles` uses.
+dihed = np.degrees(np.stack([
+    np.pi - np.arccos(np.clip(np.sum(_nrm[a] * _nrm[b], axis=-1), -1.0, 1.0))
+    for (i, j) in ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
+    for (a, b) in [tuple(k for k in range(4) if k not in (i, j))]
+], axis=-1))
+_pairs = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
+_longest = np.max(np.stack([np.linalg.norm(_v[:, j] - _v[:, i], axis=-1) for i, j in _pairs], -1), -1)
+_surf = 0.0
+for k in range(4):
+    keep = [i for i in range(4) if i != k]
+    e = np.stack([_v[:, keep[i + 1]] - _v[:, keep[0]] for i in range(2)], axis=-1)
+    gram = np.einsum("cij,cik->cjk", e, e)
+    _surf = _surf + np.sqrt(np.clip(np.linalg.det(gram), 0.0, None)) / 2.0
+aspect = _longest / (2.0 * np.sqrt(6.0) * (3.0 * cvol / (_surf + 1e-30)) + 1e-30)
 moved = np.linalg.norm(pts_f - pts0, axis=1)
 print(f"aspect [{aspect.min():.2f},{aspect.max():.2f}]  min dihedral {dihed.min():.2f} deg  "
       f"min |K| {cvol.min():.3e}  max node move {moved.max():.4f}")

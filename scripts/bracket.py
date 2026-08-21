@@ -296,7 +296,51 @@ g_vmx = (cellv / ((2.0 - rho_e) * V0MAX)).pnorm(PN, normalize=True)
 g_vmn = ((2 * V0MAX - cellv) / (2 * V0MAX - V0MIN)).pnorm(PN, normalize=True)
 perim = rho.perimeter(zeta=0.1)
 
+# --- surface smoothness ------------------------------------------------------------------------
+# The perimeter is a GLOBAL budget and converged designs exploit that: measured on this bracket at
+# h=0.15 with the barrier active and satisfied, the angle between adjacent surface facets had a
+# median of 33.5 deg, a p99 of 88.9, and 27 % of adjacent pairs above 60 deg. Both cheap levers
+# were tried and both failed -- raising MOVE_FRAC un-pinned the nodes (27.3 % -> 6.2 % at the move
+# bound) and barely moved the roughness (33.5 -> 32.0 deg), and tightening PSTAR to 31 bought
+# 26.9 deg at 91 % worse compliance. Neither is a local measure of bending, so this is.
+# `curvature()` hands back one value per RIDGE, so the aggregate is a design choice, not a detail.
+# SMOOTH_P=0 sums them, which buys down the bulk of the boundary; SMOOTH_P>0 takes a p-norm, which
+# goes after the WORST folds instead. That distinction is the one that matters here: measured on the
+# converged pair, the summed penalty took the ISO-SURFACE median from 13.9 to 11.8 deg but left 9 %
+# of its edges folded past 60 deg -- against 0 % for a smooth sphere on this same mesh, which is the
+# floor a perfect design would hit. The bulk was never the problem; the tail is.
+curv_r = rho.curvature(zeta=0.1)
+SMOOTH = float(os.environ.get("SMOOTH", "0"))
+SMOOTH_P = float(os.environ.get("SMOOTH_P", "0"))
+curv = curv_r.pnorm(SMOOTH_P) if SMOOTH_P > 0 else curv_r.sum
+if SMOOTH > 0:
+    # A weight in compliance units needs a scale, and the design cannot supply one: at iteration 0
+    # the density is uniform and the bending is EXACTLY zero. So take the scale from the mesh --
+    # what a single flat cut through it already costs, purely from its own faceting. That floor is
+    # design-independent and does not track refinement (measured 50.7 at h=0.5 against 52.4 at
+    # h=0.35 on a test box), so SMOOTH stays comparable across meshes.
+    _coord0 = [
+        jnp.asarray(pts0[np.asarray(sp["ids"], dtype=int), int(sp["axis"])])
+        for sp in (getattr(d, "_trainable_coords", []) or [])
+    ]
+    _cut = (pts0[cells].mean(axis=1)[:, 1] > 0.5 * (pts0[:, 1].min() + pts0[:, 1].max())).astype(float)
+    _flat = np.asarray(curv_r.fn(jnp.asarray(_cut), *_coord0))
+    # curvature() hands back one value per RIDGE. A jNO old enough to return the SUM instead makes
+    # `.pnorm(p)` a no-op on a scalar, so a p-norm run silently reproduces the summed one and the
+    # only visible symptom is a reference that matches the sum's. Assert the shape, not the value.
+    assert _flat.ndim == 1 and _flat.size > len(cells), (
+        f"curvature() returned {_flat.shape}; expected one value per ridge (> {len(cells)} of them). "
+        "vendor/jNO is behind -- `.pnorm()` on a scalar is the identity and the run would be a lie."
+    )
+    # The SAME aggregate the term uses, so the weight means the same thing either way.
+    S_REF = float((_flat.astype(np.float64) ** SMOOTH_P).sum() ** (1.0 / SMOOTH_P)) if SMOOTH_P > 0 else float(_flat.sum())
+    assert S_REF > 0.0, "a flat cut through an unstructured mesh has nonzero bending; got zero"
+    print(f"smoothness: SMOOTH={SMOOTH} aggregate={'p-norm p=' + str(SMOOTH_P) if SMOOTH_P > 0 else 'sum'}  "
+          f"flat-cut reference S_ref={S_REF:.4g}  weight={SMOOTH / S_REF:.4e}", flush=True)
+
 terms, callbacks = [compliance], []
+if SMOOTH > 0:
+    terms.append(((SMOOTH / S_REF) * curv).name("S"))
 if PSTAR > 0:
     beta_p = jno.np.parameter((1,), name="beta")
     beta_p.dtype(jnp.float64)
@@ -317,7 +361,7 @@ crux = jno.core(terms, domain=jno.domain.from_array({"_": np.zeros((1, 1))}))
 
 coord_specs = list(getattr(d, "_trainable_coords", []) or [])
 coord_nodes = [sp["expr"] for sp in coord_specs]
-hist = {k: [] for k in ("it", "C", "V", "P", "mnd", "ang", "asp", "vmx", "vmn")}
+hist = {k: [] for k in ("it", "C", "V", "P", "S", "mnd", "ang", "asp", "vmx", "vmn")}
 frames_rho, frames_pts = [], []
 ev = lambda n: float(np.asarray(crux.eval([n])).reshape(-1)[0])  # noqa: E731
 DST = os.path.join(OUT, f"topo3d_{TAG}.npz")
@@ -356,6 +400,7 @@ def record(it_now):
         ("C", ev(compliance)),
         ("V", ev(volume)),
         ("P", ev(perim)),
+        ("S", ev(curv_r.sum)),
         ("mnd", float(4.0 * np.mean(r * (1.0 - r)))),
         ("ang", ev(g_ang)),
         ("asp", ev(g_asp)),
@@ -367,7 +412,7 @@ def record(it_now):
     frames_pts.append(p.copy())
     print(
         f"  it {it:4d}  C={hist['C'][-1]:10.4f}  V={hist['V'][-1]:.4f}  P={hist['P'][-1]:8.2f}  "
-        f"M_nd={hist['mnd'][-1]:.4f}  beta_H={_beta_now[0]:.1f}  g_ang={hist['ang'][-1]:.3f} "
+        f"S={hist['S'][-1]:8.2f}  M_nd={hist['mnd'][-1]:.4f}  beta_H={_beta_now[0]:.1f}  g_ang={hist['ang'][-1]:.3f} "
         f"asp={hist['asp'][-1]:.3f} vmx={hist['vmx'][-1]:.3f}  ({time.time() - t0:.0f}s)",
         flush=True,
     )

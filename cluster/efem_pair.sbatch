@@ -40,12 +40,21 @@ set -uo pipefail
 # COMPARE AT MATCHED REFINEMENT LEVEL, not headline to headline: a coarser reanalysis produces a
 # weaker lower bound, so a less-refined case looks better purely for being less refined.
 #
-#   sbatch cluster/efem_pair.sbatch                 # HMESH=0.10, both formulations
-#   HMESH=0.12 sbatch cluster/efem_pair.sbatch      # cheaper first pass
+# RUNS WITH OR WITHOUT A SCHEDULER. The #SBATCH lines are comments to a plain shell, and every
+# SLURM variable below has a fallback, so `bash cluster/efem_pair.sbatch` is a first-class way to
+# run it. On a bare machine BUDGET is the only thing that stops it -- there is no wall clock.
+#
+#   sbatch cluster/efem_pair.sbatch                        # scheduler
+#   bash   cluster/efem_pair.sbatch                        # bare machine
+#   HMESH=0.12 bash cluster/efem_pair.sbatch               # cheaper first pass
 
-export JNO_DIR="${JNO_DIR:-${SLURM_SUBMIT_DIR}/vendor/jNO}"
+export JNO_DIR="${JNO_DIR:-${SLURM_SUBMIT_DIR:-$PWD}/vendor/jNO}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-128}"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
+# One visible GPU on purpose. Nothing in this pipeline shards across devices, and jNO's mesh-sharding
+# path keys off what JAX can see -- on an 8-GPU box that would silently pick an execution plan we
+# have never tested. CUDA_VISIBLE_DEVICES=0,1,.. only once sharding is measured, not before.
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 # The linear solve is PARDISO on the host here (scripts/bracket.py imports pardiso_solver directly),
 # so the GPU is requested for the assembly/AD side only. Drop --gres if the queue is tight.
@@ -72,7 +81,7 @@ export REFINE="${REFINE:-2}"
 export FEMCHUNK="${FEMCHUNK:-0}"
 export CHUNK="${CHUNK:-50}"         # CHUNK=10 stalls this problem -- see README
 
-cd "${SLURM_SUBMIT_DIR}"
+cd "${SLURM_SUBMIT_DIR:-$PWD}"
 JRUN=(pixi run --manifest-path "$JNO_DIR/pyproject.toml" -e fem python -u)
 mkdir -p runs
 # The reanalysis writes a .msh per solve. On a fine design those are large and purely intermediate,

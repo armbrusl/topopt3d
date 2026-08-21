@@ -51,10 +51,24 @@ set -uo pipefail
 export JNO_DIR="${JNO_DIR:-${SLURM_SUBMIT_DIR:-$PWD}/vendor/jNO}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-128}"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
-# One visible GPU on purpose. Nothing in this pipeline shards across devices, and jNO's mesh-sharding
-# path keys off what JAX can see -- on an 8-GPU box that would silently pick an execution plan we
-# have never tested. CUDA_VISIBLE_DEVICES=0,1,.. only once sharding is measured, not before.
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+# DEVICE=cpu by DEFAULT, and that is not a fallback -- it is the only path either formulation has
+# been validated on. Measured: SPACE=cover dies on the GPU with
+#   ValueError: Incompatible types for broadcasting: input=float64[67968], requested=float64[271872]
+# where 271872 = 4 x 67968 and 4 is exactly the cover multiplier (1 value + 3 covers). It is not
+# simply "cover on GPU" -- h=0.35 (1,818 tets) runs fine on one -- so it is size- or path-dependent
+# and not yet diagnosed. Lagrange on GPU is fine; only the enriched space is affected.
+#
+# The CPU path costs nothing here: PARDISO is on the host anyway, and the chunk policy now derives
+# its budget from host RAM, so a 1 TB machine gets a ~1.5 GB chunk and bounded memory for free.
+export DEVICE="${DEVICE:-cpu}"
+if [ "$DEVICE" = "cpu" ]; then
+    export CUDA_VISIBLE_DEVICES=""
+    export JAX_PLATFORMS=cpu
+else
+    # One visible device on purpose: nothing shards, and jNO's mesh-sharding path keys off what JAX
+    # can see, so 8 of them would silently pick an execution plan we have never tested.
+    export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+fi
 
 # The linear solve is PARDISO on the host here (scripts/bracket.py imports pardiso_solver directly),
 # so the GPU is requested for the assembly/AD side only. Drop --gres if the queue is tight.
@@ -109,8 +123,11 @@ if [ "${REANALYSE_ONLY:-0}" != "1" ]; then
         continue
     fi
     echo "=== ${TAG_} optimisation ($(date -Is)) ==========================================="
-    SPACE="${SPACE_}" TAG="${TAG_}" "${JRUN[@]}" scripts/bracket.py
-    echo "--- ${TAG_} optimisation exit=$? ($(date -Is))"
+    # tee, not >: the job log keeps the live output AND runs/<tag>.log gets the copy the report
+    # needs. Without that file `cluster_report.py` cannot tell a truncated run from a finished one,
+    # which it flagged on the first smoke run.
+    SPACE="${SPACE_}" TAG="${TAG_}" "${JRUN[@]}" scripts/bracket.py 2>&1 | tee "runs/${TAG_}.log"
+    echo "--- ${TAG_} optimisation exit=${PIPESTATUS[0]} ($(date -Is))"
   done
 fi
 

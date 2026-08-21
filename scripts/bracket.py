@@ -66,6 +66,9 @@ THETA_MIN, PN, TOL = np.deg2rad(float(os.environ.get("THETA_MIN_DEG", "15.0"))),
 ASPECT_MAX = float(os.environ.get("ASPECT_MAX", "8.0"))
 MOVE_BOUND = float(os.environ.get("MOVE_FRAC", "1.0")) * H_MESH
 RELOCATE = int(os.environ.get("RELOCATE", "1"))
+# Read here, not at the point of use: the CONFIG banner below prints it, and a knob that the
+# banner reports has to exist by the time the banner runs.
+SPACE = os.environ.get("SPACE", "Lagrange")
 WASHER = float(
     os.environ.get("WASHER", "0.45")
 )  # non-design ring around each bolt hole
@@ -283,12 +286,22 @@ else:
     print("RELOCATE=0: nodes are pinned, this is a density-only run", flush=True)
 
 # --- design variable 1 -----------------------------------------------------------------------
-# SPACE=cover turns on E-FEM (the paper's Sec. 2.2, eq. 6-11). It is not cosmetic: with the
-# conventional formulation the converged 3-D design reanalyses 29.0% stiffer than it really is,
-# because nodal movement WITHIN the geometric constraints still buys artificial stiffness. The
-# paper's own words: geometric constraints and the enriched approximation "play complementary
-# roles". Their 2-D Fig. 7 measures +17.6% without it and -0.5% with.
-SPACE = os.environ.get("SPACE", "Lagrange")
+# SPACE=cover turns on E-FEM (the paper's Sec. 2.2, eq. 6-11). It is not cosmetic. Measured on the
+# corrected h=0.25 pair -- identical mesh, load, supports, material budget and iteration count, the
+# formulation the only difference -- against an independent solve of the geometry each design
+# actually produced:
+#
+#     Lagrange   reported 4.8591,  its extracted solid refines to >= 15.6882   (understates >= 3.2x)
+#     E-FEM      reported 6.0357,  its extracted solid refines to >=  5.9528   (within a few %)
+#
+# The mechanism is not element distortion (the equal-count control gives +3.67 % and -0.09 %), it is
+# material: at rho>0.5 the Lagrange design retains only 3.3836 of its 3.8159, so 11.3 % of it is grey
+# that thresholding destroys, against 1.8 % for E-FEM. Their 2-D Fig. 7 is the same shape: +17.6 %
+# without it, -0.5 % with.
+#
+# Both bounds are one-sided and still climbing, so read them as ">=" and not as converged values.
+# An earlier "+29.0 % attributable" claim measured here is WITHDRAWN -- it predates the support-drift
+# fix and was computed against a compliance the optimiser could not reproduce.
 u, phi = d.fem_symbols(value_shape=(3,), **({"space": "cover"} if SPACE == "cover" else {}))
 _r, s = d.fem_symbols(space="P0", names=("r", "s"))
 rho = jno.np.parameter(s, name="rho")

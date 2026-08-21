@@ -110,7 +110,11 @@ print(
     flush=True,
 )
 print(
-    f"           volfrac={VOLFRAC}  pull={np.round(PULL, 3)}  PSTAR={PSTAR}  BETA_H={BETA_H}  TAG={TAG}",
+    f"           volfrac={VOLFRAC}  pull={np.round(PULL, 3)}  PSTAR={PSTAR}  BETA_H={BETA_H}  TAG={TAG}\n"
+    # BUDGET is a HARD stop: the loop is `while elapsed < BUDGET and it < ITERS`, so a run that hits
+    # the clock saves a partial design that looks complete. Printing both is what lets anything
+    # downstream tell the two apart.
+    f"           ITERS={ITERS}  BUDGET={BUDGET:.0f}s  CHUNK={CHUNK}  SPACE={SPACE}  RELOCATE={RELOCATE}",
     flush=True,
 )
 print("=" * 92, flush=True)
@@ -369,6 +373,19 @@ A_eye = _facet_area(
 assert A_eye > 1e-12, "the rope patch has no boundary facets"
 print(f"rope patch area {A_eye:.4f} (nominal {(TOPR - TOPL) * LZ:.4f})", flush=True)
 
+# jNO's element-loop chunking is what caps the batched AD intermediate, but its policy floors the
+# chunk at 8192 CELLS and then disables chunking entirely when the mesh is smaller than that. Our
+# mesh is 4,082 tets, so it never engages -- and the per-cell cost is n_test * n_local**2, which the
+# cover space raises 64x (48**3 against 12**3). Measured peak RSS at 4,082 tets: Lagrange 2.5 GB,
+# cover 13.1 GB, cover + trainable coordinates 36.2 GB. FEMCHUNK caps it by hand.
+# Default ON for the enriched space, because jNO's own policy cannot protect it: the chunk is
+# floored at 8192 CELLS while the thing it bounds is BYTES, so a 48-DOF element blows the 8 MB budget
+# by three orders of magnitude and, on a mesh smaller than the floor, chunking is skipped entirely.
+# Measured peak RSS with trainable coordinates: 4,082 tets 36.2 GB -> 13.4 GB, and h=0.15 (16,691
+# tets) fits in 20.6 GB, which is LESS than the coarse mesh used before. Costs ~6 % runtime, and
+# iteration 0 is identical to every printed digit, so it is exact. Lagrange needs none of this -- its
+# per-cell cost is 64x smaller (12**3 against 48**3) and jNO's policy handles it.
+_FEMCHUNK = int(os.environ.get("FEMCHUNK", "128" if SPACE == "cover" else "0"))
 fem = jno.fem(
     [
         E(rho) * a(eps(u), eps(phi)),
@@ -376,6 +393,7 @@ fem = jno.fem(
         -1.0 * inner(jnp.asarray(PULL / A_eye), phi.bind(**dict(zip("xyz", eye))), 1),
     ],
     quad_degree=2,
+    **({"chunk": _FEMCHUNK} if _FEMCHUNK > 0 else {}),
 )
 
 _A_op, _b = fem.operator.evaluate({"rho": jnp.full(NT, VOLFRAC)})

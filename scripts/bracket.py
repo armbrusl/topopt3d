@@ -65,6 +65,7 @@ THETA_MIN, PN, TOL = np.deg2rad(float(os.environ.get("THETA_MIN_DEG", "15.0"))),
 # limits node migration -- the two are easy to confuse because both show up as a pinned mesh.
 ASPECT_MAX = float(os.environ.get("ASPECT_MAX", "8.0"))
 MOVE_BOUND = float(os.environ.get("MOVE_FRAC", "1.0")) * H_MESH
+RELOCATE = int(os.environ.get("RELOCATE", "1"))
 WASHER = float(
     os.environ.get("WASHER", "0.45")
 )  # non-design ring around each bolt hole
@@ -128,33 +129,154 @@ for _t in range(NT):
 for _k in _seen:
     _bnd[list(_k)] = True
 _interior_ids = np.flatnonzero(~_bnd)
-print(f"movable interior nodes: {_interior_ids.size} of {pts0.shape[0]}", flush=True)
-_lo, _hi = pts0[_interior_ids].min(axis=0), pts0[_interior_ids].max(axis=0)
-xm, ym, zm, _ = d.variable(
-    "mv",
-    where=lambda x, y, z: (
-        (x > _lo[0] - 1e-9)
-        & (x < _hi[0] + 1e-9)
-        & (y > _lo[1] - 1e-9)
-        & (y < _hi[1] + 1e-9)
-        & (z > _lo[2] - 1e-9)
-        & (z < _hi[2] + 1e-9)
-    ),
-    split=True,
-)
-xm.trainable(name="mesh_x"), ym.trainable(name="mesh_y"), zm.trainable(name="mesh_z")
-ids = np.asarray(d._trainable_coords[0]["ids"], dtype=int)
-for spec in d._trainable_coords:
-    c0 = pts0[ids, int(spec["axis"])]
-    spec["expr"].optimizer(
-        jno.optimizers.mma(
-            move=0.02,
-            lower=c0 - MOVE_BOUND,
-            upper=c0 + MOVE_BOUND,
-            move_gamma=0.9985,
-            move_min=0.001,
-        )
+
+# What may move: everything EXCEPT the surfaces a boundary condition is anchored to. This used to be
+# a bounding box over the interior nodes, which is not the interior of anything -- it promoted 175
+# BOUNDARY nodes (the hole walls and the sloped faces) on top of the 277 interior ones, exactly what
+# the comment above warns against.
+#
+# It fails silently, and that is the dangerous part. The "boltwalls" tag is materialised ONCE from
+# the initial coordinates and clamps those node IDS for the whole run, so a node that drifts off the
+# hole wall stays clamped while any independent re-solve of the saved mesh clamps whatever is
+# geometrically on the wall instead. Measured on h25_Lagrange: 146 clamped nodes at setup, 106 still
+# inside the clamp band at convergence, and the reported compliance 4.6412 against 5.2876 from an
+# independent P1 solve of the same mesh and the same density -- a 13.9 % gap that grows with every
+# iteration. With the nodes pinned the same check agrees to 0.00 % at every frame.
+#
+# The margin has to apply to BOUNDARY nodes only. A boundary node is what a Dirichlet facet is made
+# of, so only a boundary node can wander into the clamp band and change the support set; an interior
+# node never can, because connectivity is fixed and it can never become a boundary node. Freezing a
+# solid cylinder instead -- interior nodes included -- is what broke the first attempt: it captured
+# the elements that violate the element-volume bound, g_vmx became unsatisfiable by ANY nodal motion,
+# and MMA spent the run in feasibility restoration (nodes moved 0.045 instead of 0.407, vmx never
+# left 1.734, compliance ended at 1.65e3 against 4.07).
+#
+# With the split, the margins can be big enough to be airtight. A node moves at most MOVE_BOUND per
+# axis, so its radial excursion in x-y is at most sqrt(2) * MOVE_BOUND: no free boundary node can
+# reach the band, and no frozen one can leave it. `record()` still checks, so a miss is loud.
+_RMARGIN = float(np.sqrt(2.0)) * MOVE_BOUND
+_YMARGIN = MOVE_BOUND
+_BND_XYZ = pts0[_bnd]
+
+
+def _bc_zone_np(X, Y, Z):
+    """The BC-carrying surfaces, grown by the margin: bolt clamp band and the loaded rope patch."""
+    return (
+        (np.hypot(X - BX1, Y - BY) < RB + 0.10 + _RMARGIN)
+        | (np.hypot(X - BX2, Y - BY) < RB + 0.10 + _RMARGIN)
+        | ((Y > LY - _YMARGIN) & (X > TOPL - _RMARGIN) & (X < TOPR + _RMARGIN))
     )
+
+
+def _on_boundary_np(X, Y, Z):
+    """Is each point one of the blank's initial BOUNDARY nodes? Exact, by coordinate match."""
+    P = np.stack([X, Y, Z], axis=-1)
+    onb = np.zeros(P.shape[0], dtype=bool)
+    for i in range(0, P.shape[0], 1024):  # chunked: the pairwise block is O(chunk * n_boundary)
+        blk = P[i : i + 1024]
+        onb[i : i + 1024] = (((blk[:, None, :] - _BND_XYZ[None, :, :]) ** 2).sum(-1).min(axis=1)) < 1e-18
+    return onb
+
+
+# --- tangential sliding -------------------------------------------------------------------------
+# The design domain is GIVEN data, so a boundary node may slide WITHIN its own surface but never off
+# it. The boundary is then the same point set at every iteration and the blank's volume is exactly
+# invariant. Letting the outline move freely instead is not a milder version of this, it is a
+# different problem: with the material budget written as a fraction of the CURRENT cell volumes, the
+# optimiser pushes the outline outwards and is handed more material for doing so. Measured, blank
+# 12.72 -> 18.05 (+42 %), material 3.81 -> 5.39, and a compliance of 3.11 against 4.07 -- bought, not
+# designed. (The budget is now absolute as well, so neither half of that can recur.)
+#
+# Sliding is expressed per AXIS because a coordinate design variable is a box-bounded scalar: a node
+# on an axis-aligned face simply never gets its normal component promoted. Exact for the flat faces.
+# The two tapered faces are not axis-aligned, so their in-plane freedom is not a box -- but they are
+# extruded in z, so a taper node still slides in z and only x and y are withheld. A node on a
+# non-axis-aligned EDGE (taper meeting a flat face) is frozen: 1-D freedom along it is not a box
+# either, and guessing here would move the outline.
+_STOL = 1e-7
+
+
+def _taper_plane(pa, pb):
+    """(n, c) of the z-extruded plane through two polygon corners, with n.(x, y) = c."""
+    n = np.array([pb[1] - pa[1], pa[0] - pb[0]], dtype=float)
+    n /= np.linalg.norm(n)
+    return n, float(n @ np.asarray(pa, dtype=float))
+
+
+_TAPERS = (_taper_plane((LX, SHOULDER), (TOPR, LY)), _taper_plane((TOPL, LY), (0.0, SHOULDER)))
+
+
+def _blocked_axes(X, Y, Z):
+    """Per-axis motion a boundary node may NOT take without leaving its own surface."""
+    on_x = (np.abs(X) < _STOL) | (np.abs(X - LX) < _STOL)
+    on_y = (np.abs(Y) < _STOL) | (np.abs(Y - LY) < _STOL)
+    on_z = (np.abs(Z) < _STOL) | (np.abs(Z - LZ) < _STOL)
+    on_t = np.zeros(X.shape, dtype=bool)
+    for n, c in _TAPERS:
+        on_t |= np.abs(n[0] * X + n[1] * Y - c) < _STOL
+    return (on_x | on_t), (on_y | on_t), on_z
+
+
+def _free_axis_where(axis):
+    """Predicate for 'this node may move along `axis`'. Interior nodes always may."""
+
+    def where(x, y, z):
+        X, Y, Z = (np.asarray(v).reshape(-1) for v in (x, y, z))
+        onb = _on_boundary_np(X, Y, Z)
+        blocked = _blocked_axes(X, Y, Z)[axis]
+        return ~(onb & (_bc_zone_np(X, Y, Z) | blocked))
+
+    return where
+
+
+def _clamped_np(P):
+    """The bolt clamp, on plain numpy -- for checking the set has not drifted.
+
+    Restricted to BOUNDARY nodes: a Dirichlet condition is applied on boundary facets, so only a
+    boundary node can join or leave the support. Counting interior nodes here reports a drift that
+    does not exist -- measured, 6-8 phantom nodes per frame while the independent re-solve agreed
+    to 0.00 %.
+    """
+    return (
+        (np.hypot(P[:, 0] - BX1, P[:, 1] - BY) < RB + 0.10)
+        | (np.hypot(P[:, 0] - BX2, P[:, 1] - BY) < RB + 0.10)
+    ) & _bnd
+
+
+_CLAMP0 = _clamped_np(pts0)
+xm = d.variable("mvx", where=_free_axis_where(0), split=True)[0]
+ym = d.variable("mvy", where=_free_axis_where(1), split=True)[1]
+zm = d.variable("mvz", where=_free_axis_where(2), split=True)[2]
+# RELOCATE=0 leaves the nodes where gmsh put them -- the ablation that separates "what the density
+# field bought" from "what moving the mesh bought". It has to skip `.trainable()` entirely: pinning
+# by squeezing the MMA box to zero width instead makes the coordinate subproblem degenerate and the
+# joint solve walks off (measured: C jumps to 2.4e3 at iteration 10 and freezes there).
+if RELOCATE:
+    xm.trainable(name="mesh_x"), ym.trainable(name="mesh_y"), zm.trainable(name="mesh_z")
+    # Each axis carries its OWN id set now -- a node on the top face is free in x and y but not z --
+    # so nothing here may reuse spec[0]'s ids for the others.
+    _per = {int(sp["axis"]): np.asarray(sp["ids"], dtype=int) for sp in d._trainable_coords}
+    _any = np.unique(np.concatenate([v for v in _per.values()])) if _per else np.array([], dtype=int)
+    print(
+        f"movable: {_any.size} of {pts0.shape[0]} nodes "
+        f"({int((~_bnd[_any]).sum())} interior, {int(_bnd[_any].sum())} sliding on the surface); "
+        f"free dofs x/y/z = {_per[0].size}/{_per[1].size}/{_per[2].size} of {3 * pts0.shape[0]}; "
+        f"{int(_CLAMP0.sum())} clamped; BC boundary frozen, margins r={_RMARGIN:.3f} y={_YMARGIN:.3f}",
+        flush=True,
+    )
+    for spec in d._trainable_coords:
+        c0 = pts0[np.asarray(spec["ids"], dtype=int), int(spec["axis"])]
+        spec["expr"].optimizer(
+            jno.optimizers.mma(
+                move=0.02,
+                lower=c0 - MOVE_BOUND,
+                upper=c0 + MOVE_BOUND,
+                move_gamma=0.9985,
+                move_min=0.001,
+            )
+        )
+else:
+    print("RELOCATE=0: nodes are pinned, this is a density-only run", flush=True)
 
 # --- design variable 1 -----------------------------------------------------------------------
 # SPACE=cover turns on E-FEM (the paper's Sec. 2.2, eq. 6-11). It is not cosmetic: with the
@@ -286,7 +408,19 @@ print(f"clamped nodes: {int(fixed_nodes.sum())}", flush=True)
 # --- objective and constraints ---------------------------------------------------------------
 compliance = (E(rho) * a(eps(u), eps(u))).integrate(fem, solver=pardiso_lu)
 cellv = d.cell_volume()
-volume = (rho.reshape(-1) * cellv).sum / (VOLFRAC * cellv.sum)
+# Against the INITIAL blank, not the current one. `cellv.sum` is a functional of the moving mesh, so
+# a fraction of it is a moving target: any outward motion of the outline raises the denominator and
+# buys material. Measured before this was pinned down: +42 % blank, +42 % material, and a compliance
+# that improved for neither reason. Tangential sliding already holds the blank fixed; this makes the
+# budget independent of the mesh regardless.
+_V0_BLANK = float(
+    np.abs(
+        np.linalg.det(np.stack([pts0[cells][:, i + 1] - pts0[cells][:, 0] for i in range(3)], -1))
+    ).sum()
+    / 6.0
+)
+print(f"material budget: {VOLFRAC} x {_V0_BLANK:.4f} = {VOLFRAC * _V0_BLANK:.4f} (fixed)", flush=True)
+volume = (rho.reshape(-1) * cellv).sum / (VOLFRAC * _V0_BLANK)
 g_ang = (
     ((2 * np.pi - d.cell_angles()) / (2 * np.pi - THETA_MIN))
     .reshape(-1)
@@ -427,6 +561,16 @@ def record(it_now):
         ("vmn", ev(g_vmn)),
     ):
         hist[k].append(v)
+    # The failure this guards against is silent by construction: the clamp is bound to node IDs at
+    # setup, so a drifting support still "works" and only an independent re-solve ever notices.
+    _cf = _clamped_np(p)
+    if int((_cf != _CLAMP0).sum()):
+        print(
+            f"  WARNING: the clamped set drifted, {int(_CLAMP0.sum())} -> {int(_cf.sum())} nodes "
+            f"({int((_cf != _CLAMP0).sum())} changed). The reported compliance is no longer the "
+            f"compliance of the saved mesh.",
+            flush=True,
+        )
     frames_rho.append(r.copy())
     frames_pts.append(p.copy())
     print(

@@ -7,6 +7,39 @@ whose §2.3.2 leaves the tetrahedral case open. Built on [jNO](https://github.co
 The design vector is `[rho, d_x, d_y, d_z]`: one density per tetrahedron plus the position of every
 interior node. Every sensitivity comes from AD; nothing is hand-derived.
 
+## Retraction: every 3-D result before commit `477bccd` is void
+
+The relocation predicate was a bounding box over the interior nodes, so it also promoted **175
+boundary nodes** — the bolt hole walls and the outer taper. Because a Dirichlet tag binds node IDS
+once, at setup, the supports kept clamping nodes that had slid off the hole wall: **146 clamped
+nodes at setup, 106 still on the wall at convergence.** Nothing failed. The optimiser simply stopped
+reporting the compliance of the mesh it was saving — measured **4.6412 against 5.2876** from an
+independent P1 solve of the same mesh and density, a **+13.9 %** error that grew every iteration.
+
+Concretely, these previously published numbers are withdrawn:
+
+| claim | where | status |
+|---|---|---|
+| reanalysis "+29.0 % attributable" | `477bccd` message | void — computed against a drifting support |
+| "E-FEM softer at every iteration, ratio 1.36" | `477bccd` message | void — same cause |
+| "the aspect constraint now ends at 0.47" | `477bccd` message | void — same cause |
+| every `.npz`, console and figure in `runs/` | — | regenerate; all predate the fix |
+
+The direction of the E-FEM conclusion survived re-measurement and got **stronger**, but no number
+from before the fix should be quoted. The acceptance test that now guards this is in *Honesty checks
+built in*: a Lagrange run must reproduce its own reported compliance under an independent solve to
+**0.00 %** at every frame.
+
+Two further defects found while re-measuring, both fixed:
+
+* **the design domain could inflate.** With the outline free to move and the material budget written
+  as a fraction of the *current* cell volumes, the optimiser pushed the boundary out and was handed
+  more material for it: blank 12.72 → 18.05 (**+42 %**), material 3.81 → 5.39, and a compliance of
+  3.11 against 4.07 that was bought rather than designed. The budget is now absolute
+  (`VOLFRAC × V₀`, printed at startup) and boundary nodes only slide **tangentially**, so the blank
+  is invariant to machine precision (12.717462 → 12.717462 with 665 nodes moving up to 0.331).
+* **`RELOCATE=0` is not a valid density-only ablation** on this problem — see *Knobs*.
+
 ## Run it
 
 jNO comes with the repo as a **pinned submodule** (`vendor/jNO`, branch `feat/topopt-3d`), so there
@@ -179,6 +212,7 @@ All via environment, so a cluster job needs no edits:
 | `CHUNK` | `10` | iterations between snapshots |
 | `SOLVER` | `custom` | MKL PARDISO via `scripts/pardiso_solver.py` — **recommended**. Also `""` (jNO default), `host`, `device`. Not `pardiso`: it aborts, see above |
 | `MOVING` | `1` | `0` freezes the mesh (density-only) |
+| `RELOCATE` | `1` | `bracket.py`: `0` skips `.trainable()` on the coordinates entirely. Note this problem is **not** solvable density-only as configured — the initial gmsh mesh violates the element-volume bound and only nodal motion can fix it, so MMA spends the run in feasibility restoration and compliance ends at 1.6e3–2.4e3. Relax `V0MAX_FRAC` before reading anything into a pinned run |
 | `PENALP` | `1` | `0` uses a literal SIMP exponent — **required** while blocker 2 stands |
 | `PMASK` | `1` | solid non-designable material under the load |
 
@@ -193,6 +227,16 @@ All via environment, so a cluster job needs no edits:
 * The renderer reports **line pinches** — surface edges carrying more than one sheet — straight off
   the design. That is the diagnostic that says whether 3-D pinching happens often enough to justify
   a vertex criterion at all.
+* `record()` checks that the **clamped support set has not drifted**. A Dirichlet tag is
+  materialised once from the *initial* coordinates and clamps those node IDs for the whole run, so a
+  support that slides off the bolt hole keeps working and nothing raises — only an independent
+  re-solve of the saved mesh ever notices. It bit us: the relocation predicate was a bounding box
+  over the interior nodes, which promoted 175 **boundary** nodes, and the clamp went 146 nodes ->
+  106 still on the wall. The reported compliance was 4.6412 against 5.2876 from an independent P1
+  solve of the same mesh and density — a **13.9 %** gap that grew every iteration and was invisible
+  from inside the run. Now the BC-carrying boundary is frozen and the set is invariant, 146 -> 146.
+* `scripts/reanalysis_boundary.py` is the acceptance test for that: a Lagrange run must reproduce
+  its own reported compliance under an independent solve to **0.00 %** at every frame. It does.
 
 ## A long fine run on another machine
 

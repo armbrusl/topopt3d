@@ -54,7 +54,13 @@ E0, NU, PENAL = 1.0, 0.3, 3.0
 EMIN = float(os.environ.get("EMIN", "1e-4"))
 LAM, MU = E0 * NU / ((1 + NU) * (1 - 2 * NU)), E0 / (2 * (1 + NU))
 VOLFRAC = float(os.environ.get("VOLFRAC", "0.30"))
-THETA_MIN, PN, TOL = np.deg2rad(5.0), 50.0, 1e-9
+# The paper uses theta_min = 20 deg on TRIANGLE interior angles (ideal 60, so a third of ideal).
+# In 3-D `cell_angles()` returns the six DIHEDRALS, whose ideal is 70.53 deg, and the same ratio
+# would be 23.5. But gmsh hands us a mesh whose worst dihedral is already 15.23 deg, so any bound
+# above that is violated from iteration 0 -- and their own Fig. 6c shows the constraint only
+# marginally active at convergence, not violated at the start. 15 deg is the tightest bound this
+# initial mesh satisfies (0.00% of cells below it, against 0.91% below 20 deg).
+THETA_MIN, PN, TOL = np.deg2rad(float(os.environ.get("THETA_MIN_DEG", "15.0"))), 50.0, 1e-9
 # Loosening the aspect bound is how you find out whether it, rather than MOVE_FRAC, is what
 # limits node migration -- the two are easy to confuse because both show up as a pinned mesh.
 ASPECT_MAX = float(os.environ.get("ASPECT_MAX", "8.0"))
@@ -151,7 +157,13 @@ for spec in d._trainable_coords:
     )
 
 # --- design variable 1 -----------------------------------------------------------------------
-u, phi = d.fem_symbols(value_shape=(3,))
+# SPACE=cover turns on E-FEM (the paper's Sec. 2.2, eq. 6-11). It is not cosmetic: with the
+# conventional formulation the converged 3-D design reanalyses 29.0% stiffer than it really is,
+# because nodal movement WITHIN the geometric constraints still buys artificial stiffness. The
+# paper's own words: geometric constraints and the enriched approximation "play complementary
+# roles". Their 2-D Fig. 7 measures +17.6% without it and -0.5% with.
+SPACE = os.environ.get("SPACE", "Lagrange")
+u, phi = d.fem_symbols(value_shape=(3,), **({"space": "cover"} if SPACE == "cover" else {}))
 _r, s = d.fem_symbols(space="P0", names=("r", "s"))
 rho = jno.np.parameter(s, name="rho")
 rho.dtype(jnp.float64)
@@ -289,8 +301,15 @@ _v0 = (
     )
     / 6.0
 )
-V0MAX = float(os.environ.get("V0MAX_FRAC", "1.30")) * float(np.percentile(_v0, 99))
-V0MIN = float(os.environ.get("V0MIN_FRAC", "0.50")) * float(np.percentile(_v0, 1))
+# eq. (25)/(27) use [0.05, 0.75] against a NOMINAL unit-edge element (a triangle of area 0.433),
+# i.e. [0.115, 1.732] x nominal. That ratio is what transfers, not the numbers -- and it has to be
+# taken against the mesh's OWN median, because gmsh's `size=h` does not produce ideal elements: our
+# median tet is 1.79x the regular tet of edge h. Measured on the h=0.15 bracket, these bounds leave
+# 0.00% of cells under V0MIN and 0.05% over the ACTIVE cap (2-rho)V0MAX at the starting density, so
+# the run begins feasible. The previous mesh-percentile rule was 1.72x looser on the cap.
+_v0_med = float(np.median(_v0))
+V0MAX = float(os.environ.get("V0MAX_FRAC", "1.732")) * _v0_med
+V0MIN = float(os.environ.get("V0MIN_FRAC", "0.115")) * _v0_med
 rho_e = rho.reshape(-1)
 g_vmx = (cellv / ((2.0 - rho_e) * V0MAX)).pnorm(PN, normalize=True)
 g_vmn = ((2 * V0MAX - cellv) / (2 * V0MAX - V0MIN)).pnorm(PN, normalize=True)

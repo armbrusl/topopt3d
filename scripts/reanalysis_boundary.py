@@ -192,6 +192,17 @@ probe = [(t, extract(t)) for t in (0.3, 0.5, 0.7)]
 print("  sensitivity to the level: " + ", ".join(
     f"rho>{t}: {int(m.sum())} tets / {V[m].sum():.4f}" for t, m in probe))
 
+# Save what the extraction decided, so the reanalysed BODY can be inspected without re-deriving it
+# (and without re-running the solves). EXTRACT_ONLY=1 stops here, which makes that free.
+np.savez(
+    os.path.join(OUT, f"extract_{TAG}.npz"),
+    mask=mask, tau=TAU, cells=cells, pts=pts, rho=rho,
+    material_target=M_TARGET, material_kept=V[mask].sum(),
+)
+if os.environ.get("EXTRACT_ONLY") == "1":
+    print(f"EXTRACT_ONLY: wrote extract_{TAG}.npz ({int(mask.sum())} tets), stopping before the solves")
+    raise SystemExit(0)
+
 kept = cells[mask]
 
 

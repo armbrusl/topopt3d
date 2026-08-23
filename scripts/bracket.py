@@ -291,8 +291,12 @@ else:
 # formulation the only difference -- against an independent solve of the geometry each design
 # actually produced:
 #
-#     Lagrange   reported 4.8591,  its extracted solid refines to >= 15.6882   (understates >= 3.2x)
-#     E-FEM      reported 6.0357,  its extracted solid refines to >=  5.9528   (within a few %)
+#     Lagrange   reported 4.8591,  its extracted solid refines to >= 17.0401   (understates >= 251 %)
+#     E-FEM      reported 6.0357,  its extracted solid refines to >=  6.1108   (understates >=   1.2 %)
+#
+# Refined to 4M tets, where the series' increments finally settle to a ratio of ~0.5 -- O(h^1), the
+# rate a faceted body with re-entrant edges gives, not the O(h^2) a smooth one would. Extrapolating
+# from that: Lagrange ~18.6, E-FEM ~6.26.
 #
 # The mechanism is not element distortion (the equal-count control gives +3.67 % and -0.09 %), it is
 # material: at rho>0.5 the Lagrange design retains only 3.3836 of its 3.8159, so 11.3 % of it is grey

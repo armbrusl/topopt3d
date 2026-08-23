@@ -30,6 +30,48 @@ from before the fix should be quoted. The acceptance test that now guards this i
 built in*: a Lagrange run must reproduce its own reported compliance under an independent solve to
 **0.00 %** at every frame.
 
+## What the reanalysis measures
+
+`scripts/reanalysis_boundary.py` re-solves the design's own extracted solid on uniformly refined
+meshes of the identical geometry. Midpoint subdivision is exact on planar facets, so every level is
+the same body; linear tets are stiff and refinement can only soften them, so each level is a
+one-sided LOWER bound and no converged value is needed to draw a conclusion.
+
+Refined to 4M tets on the h = 0.25 pair — same mesh, load, supports, material budget and iteration
+count, the element formulation the only difference:
+
+| | reported | refined solve (4M tets) | understates by |
+|---|---|---|---|
+| conventional (Lagrange) | 4.8591 | **≥ 17.0401** | **≥ 251 %** |
+| **E-FEM** (`SPACE=cover`) | 6.0357 | **≥ 6.1108** | **≥ 1.2 %** |
+
+The cleanest form of it needs no extrapolation at all. Take ONE body — the E-FEM design — and read
+it two ways against its own refined solve (≥ 6.1108):
+
+* its own **E-FEM** solve, 6.0357 → **−1.23 %**
+* a plain **P1** solve of the identical mesh and density, 5.1628 → **−15.51 %**
+
+**E-FEM's error is 12.6× smaller on the same configuration.** For reference their 2-D Fig. 7 is
+−0.5 % with E-FEM and +17.6 % without.
+
+The mechanism is **not** element distortion: the equal-element-count control (same geometry, same
+resolution, undistorted tets) reads +0.93 % and −0.95 %. It is material. At ρ > 0.5 the Lagrange
+design retains only 2.3194 of its 3.80 at h = 0.15 — its stiffness leans on grey density that
+becomes nothing when the design is made a real solid — against E-FEM's 3.7050 of 3.82. And the
+Lagrange design's true compliance is ~3× the E-FEM design's for identical material, so it is not
+merely misreported, it is worse.
+
+**Read the bounds as bounds.** The increments settle to a ratio of ~0.5, i.e. O(h¹) — the rate a
+faceted body with re-entrant edges gives, not the O(h²) of a smooth one. That is why five levels
+were needed. Extrapolating from the settled ratio: Lagrange ~18.6, E-FEM ~6.26.
+
+Level 4 (4M tets) needs a large machine, but it only has to be paid ONCE per problem class: with the
+ratio calibrated, level 3 (500k tets, and a workstation) reproduces it to +0.2 % / −2.4 %. Using each
+series' own unsettled ratio at level 3 does not (+4.5 % / +22.3 %) — the calibration is what makes
+the cheap version trustworthy.
+
+`python scripts/fig_convergence.py` draws it.
+
 Two further defects found while re-measuring, both fixed:
 
 * **the design domain could inflate.** With the outline free to move and the material budget written

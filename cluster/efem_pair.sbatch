@@ -49,7 +49,15 @@ set -uo pipefail
 #   HMESH=0.12 bash cluster/efem_pair.sbatch               # cheaper first pass
 
 export JNO_DIR="${JNO_DIR:-${SLURM_SUBMIT_DIR:-$PWD}/vendor/jNO}"
-export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-128}"
+# NOT pinned to the core count. Measured on a 20-core workstation, PARDISO factorising a 13k-DOF
+# cover problem: OMP_NUM_THREADS unset (MKL's own default) ran 50 iterations at 3.7 s/iter using
+# ~6 cores; forcing OMP_NUM_THREADS=1 cost 3.3x (12.3 s/iter); forcing it to 4 or 20 cost another
+# 2x on top of that (24.2-24.8 s/iter), with core USAGE flat at ~4 regardless of the setting --
+# XLA's CPU thread pool and MKL's own are oversubscribing each other, not sharing work. A factorised
+# system this size (1.5M nonzeros at h=0.25) does not have enough parallel work to profit from more
+# threads, and forcing a count only adds contention. Leave it unset; do not extrapolate the workstation
+# number to a different core count without re-measuring there.
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-}"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 # DEVICE=cpu by DEFAULT, and that is not a fallback -- it is the only path either formulation has
 # been validated on. Measured: SPACE=cover dies on the GPU with

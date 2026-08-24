@@ -105,6 +105,32 @@ blank = jno.Shape.polygon(
 _bolt = lambda bx: jno.Shape.cylinder(bx, BY, -0.1, 0.0, 0.0, LZ + 0.2, RB, size=H_MESH)  # noqa: E731
 d = (blank - _bolt(BX1) - _bolt(BX2)).domain()
 cells = np.asarray(d._cells_p1())
+
+# WARMSTART=<npz> continues from a previous design: its density seeds `rho` and its converged mesh
+# becomes this run's starting geometry. Nothing is transferred or resampled -- the blank, the
+# connectivity and the cell order are identical, so the two runs share a design vector exactly.
+# That is what makes a cheap-then-expensive schedule possible: solve in the conventional space,
+# then hand the SAME variables to the enriched one.
+#
+# The mesh must be moved here, before `pts0` is read and before any coordinate is promoted:
+# `.trainable()` seeds each coordinate parameter from the mesh as it stands, so a later assignment
+# would leave the design variables pointing at the original geometry.
+_WARM = os.environ.get("WARMSTART", "")
+_warm = None
+if _WARM:
+    _warm = np.load(os.path.join(OUT, _WARM))
+    assert _warm["cells"].shape == cells.shape, (
+        f"{_WARM} has {_warm['cells'].shape[0]} cells, this blank has {cells.shape[0]} -- a warm "
+        "start needs the identical mesh, not merely a similar one"
+    )
+    assert np.array_equal(np.asarray(_warm["cells"]), cells), (
+        f"{_WARM} has the same cell COUNT but a different connectivity; the design vectors would "
+        "not correspond element for element"
+    )
+    d.mesh.points[:, :3] = _warm["pts_f"]
+    print(f"warm start: {_WARM}  (C={float(np.asarray(_warm['C']).reshape(-1)[-1]):.4f}, "
+          f"M_nd={float(4 * (_warm['rho_f'] * (1 - _warm['rho_f'])).mean()):.4f})", flush=True)
+
 pts0 = np.asarray(d.mesh.points)[:, :3]
 NT = cells.shape[0]
 print("=" * 92, flush=True)
@@ -310,7 +336,11 @@ u, phi = d.fem_symbols(value_shape=(3,), **({"space": "cover"} if SPACE == "cove
 _r, s = d.fem_symbols(space="P0", names=("r", "s"))
 rho = jno.np.parameter(s, name="rho")
 rho.dtype(jnp.float64)
-rho.initialize(jax.nn.initializers.constant(VOLFRAC))
+if _warm is not None:
+    _rho0 = jnp.asarray(np.asarray(_warm["rho_f"], dtype=float))
+    rho.initialize(lambda k, sh, dtype=None, _v=_rho0: _v.reshape(sh))
+else:
+    rho.initialize(jax.nn.initializers.constant(VOLFRAC))
 rho.optimizer(
     jno.optimizers.mma(
         move=0.15, lower=1e-3, upper=1.0, move_gamma=0.9985, move_min=0.0075
@@ -328,21 +358,37 @@ pmask = jnp.asarray(solid)
 print(f"non-design solid: {int(solid.sum())} of {NT} tets", flush=True)
 
 patch = d.patch_filter()
-_beta_now = [1.0]
+
+# The filter reparameterises and the projection composes, because one is non-local and the other is
+# pointwise. That split is not stylistic: a `constrain()` transform lives in the static half of the
+# partition, so a `beta` read there is a trace-time CONSTANT. Mutating it to ramp the sharpness --
+# which is what this script used to do -- changes nothing the step-program cache can see, so the
+# gradient stays at the starting beta while `crux.eval` recompiles and reports the new one. Measured:
+# a 250-iteration run at BETA_H=16 ended with V=0.7734, 23 % of its material unspent, because the
+# design was optimised at beta=1 and only REPORTED at 16.
+def filtered(r):
+    """Patch filter, with the non-design region forced solid. Non-local, so it reparameterises."""
+    return jnp.where(pmask, 1.0, patch(r))
 
 
-def physical(r):
-    x = jnp.where(pmask, 1.0, patch(r))
-    if BETA_H <= 0:
-        return jnp.clip(x, RHO_MIN, 1.0)
-    tb = jnp.tanh(_beta_now[0] * ETA_H)
-    proj = (tb + jnp.tanh(_beta_now[0] * (x - ETA_H))) / (
-        tb + jnp.tanh(_beta_now[0] * (1.0 - ETA_H))
-    )
-    return jnp.clip(proj, RHO_MIN, 1.0)
+rho.constrain(filtered)
 
+# No clip. `E(r) = EMIN + r**PENAL * (E0 - EMIN)` is already regular at r = 0, so clipping buys no
+# conditioning -- what it buys is a floor under the physical density, and therefore under
+# M_nd = 4*mean(r(1-r)), which is the number this run exists to drive down. The old clip at 1e-3 is
+# visible in the results as an extraction that had to threshold at rho > 0.0031 to recover its own
+# material. The void stiffness lives in EMIN, once.
+# Named apart from the perimeter barrier's `beta_p`, which is rebound further down; both are
+# scheduled scalars and a shared name here would work only by accident of ordering.
+beta_h_p = jno.np.parameter((1,), name="beta_h")
+beta_h_p.dtype(jnp.float64)
+beta_h_p.initialize(lambda k, sh, dtype=None: jnp.full(sh, 1.0))
+beta_h_p.optimizer(optax.sgd(1.0))
 
-rho.constrain(physical)
+# `rho` is the FILTERED design; `rho_phys` is what the physics, the volume and every diagnostic see.
+# Unindexed: the scheduled scalar arrives 0-dimensional here, so `beta_h_p[0]` over-indexes it.
+# A scalar broadcasts against the per-element density either way, so nothing is lost.
+rho_phys = rho.project(beta_h_p, eta=ETA_H) if BETA_H > 0 else rho
 
 # --- supports and load ---------------------------------------------------------------------------
 # The bolts clamp the HOLE WALLS -- a cylindrical surface, not a coordinate plane. Names avoid jNO's
@@ -405,7 +451,7 @@ print(f"rope patch area {A_eye:.4f} (nominal {(TOPR - TOPL) * LZ:.4f})", flush=T
 _FEMCHUNK = int(os.environ.get("FEMCHUNK", "128" if SPACE == "cover" else "0"))
 fem = jno.fem(
     [
-        E(rho) * a(eps(u), eps(phi)),
+        E(rho_phys) * a(eps(u), eps(phi)),
         u(*bolts) - (0.0, 0.0, 0.0),
         -1.0 * inner(jnp.asarray(PULL / A_eye), phi.bind(**dict(zip("xyz", eye))), 1),
     ],
@@ -413,7 +459,13 @@ fem = jno.fem(
     **({"chunk": _FEMCHUNK} if _FEMCHUNK > 0 else {}),
 )
 
-_A_op, _b = fem.operator.evaluate({"rho": jnp.full(NT, VOLFRAC)})
+# Every runtime parameter the form reads has to be supplied here, not just the density: an unset
+# `beta_h` arrives as 0, where the projection's numerator and denominator both vanish, and the load
+# probe below then measures a NaN operator and reports that the patch assembled nothing.
+_probe = {"rho": jnp.full(NT, VOLFRAC)}
+if BETA_H > 0:
+    _probe["beta_h"] = jnp.asarray(1.0)
+_A_op, _b = fem.operator.evaluate(_probe)
 _f = np.asarray(jnp.asarray(_b)).reshape(-1, 3)
 _res = _f.sum(axis=0)
 print(
@@ -441,7 +493,7 @@ fixed_nodes = np.asarray(
 print(f"clamped nodes: {int(fixed_nodes.sum())}", flush=True)
 
 # --- objective and constraints ---------------------------------------------------------------
-compliance = (E(rho) * a(eps(u), eps(u))).integrate(fem, solver=pardiso_lu)
+compliance = (E(rho_phys) * a(eps(u), eps(u))).integrate(fem, solver=pardiso_lu)
 cellv = d.cell_volume()
 # Against the INITIAL blank, not the current one. `cellv.sum` is a functional of the moving mesh, so
 # a fraction of it is a moving target: any outward motion of the outline raises the denominator and
@@ -455,7 +507,7 @@ _V0_BLANK = float(
     / 6.0
 )
 print(f"material budget: {VOLFRAC} x {_V0_BLANK:.4f} = {VOLFRAC * _V0_BLANK:.4f} (fixed)", flush=True)
-volume = (rho.reshape(-1) * cellv).sum / (VOLFRAC * _V0_BLANK)
+volume = (rho_phys.reshape(-1) * cellv).sum / (VOLFRAC * _V0_BLANK)
 g_ang = (
     ((2 * np.pi - d.cell_angles()) / (2 * np.pi - THETA_MIN))
     .reshape(-1)
@@ -479,10 +531,10 @@ _v0 = (
 _v0_med = float(np.median(_v0))
 V0MAX = float(os.environ.get("V0MAX_FRAC", "1.732")) * _v0_med
 V0MIN = float(os.environ.get("V0MIN_FRAC", "0.115")) * _v0_med
-rho_e = rho.reshape(-1)
+rho_e = rho_phys.reshape(-1)
 g_vmx = (cellv / ((2.0 - rho_e) * V0MAX)).pnorm(PN, normalize=True)
 g_vmn = ((2 * V0MAX - cellv) / (2 * V0MAX - V0MIN)).pnorm(PN, normalize=True)
-perim = rho.perimeter(zeta=0.1)
+perim = rho_phys.perimeter(zeta=0.1)
 
 # --- surface smoothness ------------------------------------------------------------------------
 # The perimeter is a GLOBAL budget and converged designs exploit that: measured on this bracket at
@@ -497,7 +549,7 @@ perim = rho.perimeter(zeta=0.1)
 # converged pair, the summed penalty took the ISO-SURFACE median from 13.9 to 11.8 deg but left 9 %
 # of its edges folded past 60 deg -- against 0 % for a smooth sphere on this same mesh, which is the
 # floor a perfect design would hit. The bulk was never the problem; the tail is.
-curv_r = rho.curvature(zeta=0.1)
+curv_r = rho_phys.curvature(zeta=0.1)
 SMOOTH = float(os.environ.get("SMOOTH", "0"))
 SMOOTH_P = float(os.environ.get("SMOOTH_P", "0"))
 curv = curv_r.pnorm(SMOOTH_P) if SMOOTH_P > 0 else curv_r.sum
@@ -527,6 +579,14 @@ if SMOOTH > 0:
           f"flat-cut reference S_ref={S_REF:.4g}  weight={SMOOTH / S_REF:.4e}", flush=True)
 
 terms, callbacks = [compliance], []
+if BETA_H > 0:
+    # Keyed to the run through `over`, and counted by the callback itself rather than read off
+    # `epoch` -- `epoch` is per-solve()-call, so a schedule reading it makes CHUNK a physics knob
+    # (measured: beta 10.8 at CHUNK=10 against 1.6 at CHUNK=50, M_nd 0.008 against 0.078).
+    _hv = jno.optimizers.heaviside_continuation(
+        beta_h_p, start=1.0, maximum=BETA_H, over=max(1, int(BETA_AT * ITERS))
+    )
+    callbacks.append(_hv)
 if SMOOTH > 0:
     terms.append(((SMOOTH / S_REF) * curv).name("S"))
 if PSTAR > 0:
@@ -577,7 +637,8 @@ def record(it_now):
     """Snapshot the design, the mesh and the history at ``it_now``, and checkpoint."""
     global it
     it = it_now
-    r = np.asarray(crux.eval([rho])).reshape(-1)
+    # The PROJECTED field -- what the physics saw and what the reanalysis will extract.
+    r = np.asarray(crux.eval([rho_phys])).reshape(-1)
     p = pts0.copy()
     for sp, node in zip(coord_specs, coord_nodes):
         p[np.asarray(sp["ids"], dtype=int), int(sp["axis"])] = np.asarray(
@@ -610,7 +671,7 @@ def record(it_now):
     frames_pts.append(p.copy())
     print(
         f"  it {it:4d}  C={hist['C'][-1]:10.4f}  V={hist['V'][-1]:.4f}  P={hist['P'][-1]:8.2f}  "
-        f"S={hist['S'][-1]:8.2f}  M_nd={hist['mnd'][-1]:.4f}  beta_H={_beta_now[0]:.1f}  g_ang={hist['ang'][-1]:.3f} "
+        f"S={hist['S'][-1]:8.2f}  M_nd={hist['mnd'][-1]:.4f}  beta_H={(_hv.value if BETA_H > 0 else 0.0):.2f}  g_ang={hist['ang'][-1]:.3f} "
         f"asp={hist['asp'][-1]:.3f} vmx={hist['vmx'][-1]:.3f}  ({time.time() - t0:.0f}s)",
         flush=True,
     )
@@ -620,14 +681,6 @@ def record(it_now):
 it, t0 = 0, time.time()
 record(0)
 while time.time() - t0 < BUDGET and it < ITERS:
-    if BETA_H > 0:
-        # Tied to a FRACTION OF THE RUN, not to a fixed per-iteration rate and not to how the
-        # run is chunked. A fixed rate silently couples the projection to the iteration budget:
-        # 1.10 per 10 iterations reaches beta = 10.8 by iteration 250 but only 3.8 by 140, so a
-        # shorter run is not the same optimisation stopped early -- it is a different one, barely
-        # projected. Ramping once per `crux.solve()` call was worse still and made CHUNK a physics
-        # knob (beta 10.8 at CHUNK=10 against 1.6 at CHUNK=50, M_nd 0.008 against 0.078).
-        _beta_now[0] = min(BETA_H, float(BETA_H) ** min(1.0, it / max(BETA_AT * ITERS, 1.0)))
     crux.solve(CHUNK, callbacks=callbacks)
     record(it + CHUNK)
 

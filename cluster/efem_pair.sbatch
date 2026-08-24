@@ -59,16 +59,21 @@ export JNO_DIR="${JNO_DIR:-${SLURM_SUBMIT_DIR:-$PWD}/vendor/jNO}"
 # number to a different core count without re-measuring there.
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-}"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
-# DEVICE=cpu by DEFAULT, and that is not a fallback -- it is the only path either formulation has
-# been validated on. Measured: SPACE=cover dies on the GPU with
+# DEVICE=gpu by DEFAULT. This used to default to cpu, because SPACE=cover crashed under a GPU:
 #   ValueError: Incompatible types for broadcasting: input=float64[67968], requested=float64[271872]
-# where 271872 = 4 x 67968 and 4 is exactly the cover multiplier (1 value + 3 covers). It is not
-# simply "cover on GPU" -- h=0.35 (1,818 tets) runs fine on one -- so it is size- or path-dependent
-# and not yet diagnosed. Lagrange on GPU is fine; only the enriched space is affected.
+# where 271872 = 4 x 67968, the cover multiplier -- the facet path was not expanding the cover, so
+# any TRACTION under space="cover" broke on GPU (Dirichlet-only and volume-only forms happened to
+# avoid it). Fixed in jNO (the facet path now expands the cover, same as the volume path) and
+# regression-tested (a cover element under a traction, 2-D and 3-D). The crash this default was
+# protecting against no longer exists.
 #
-# The CPU path costs nothing here: PARDISO is on the host anyway, and the chunk policy now derives
-# its budget from host RAM, so a 1 TB machine gets a ~1.5 GB chunk and bounded memory for free.
-export DEVICE="${DEVICE:-cpu}"
+# And staying on CPU has a real cost: cluster/calibrate.sh, run on this hardware, measured
+# GPU-assisted assembly beating every CPU thread setting (5.10 s/iter vs a 6.30-8.15 s/iter CPU
+# sweep at h=0.20 on an H200 node) -- so DEVICE=cpu was quietly throwing that away by default.
+# The linear SOLVE stays on the host regardless (PARDISO through pypardiso, unconditionally --
+# see the SOLVER note below); only assembly/AD move. Set DEVICE=cpu explicitly to opt back out,
+# e.g. to reproduce a pre-GPU-fix measurement, or if a GPU run hits something calibrate.sh did not.
+export DEVICE="${DEVICE:-gpu}"
 if [ "$DEVICE" = "cpu" ]; then
     export CUDA_VISIBLE_DEVICES=""
     export JAX_PLATFORMS=cpu

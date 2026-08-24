@@ -26,7 +26,10 @@ PSTAR_FRAC="${PSTAR_FRAC:-0.86}"   # target / natural, the ratio used at h = 0.1
 PROBE_ITERS="${PROBE_ITERS:-15}"
 CHUNK="${CHUNK:-10}"
 TAG="${TAG:-bracket_fine}"
-SOLVER="${SOLVER:-custom}"      # MKL PARDISO through scripts/pardiso_solver.py; see README
+# NOT read by bracket.py -- it hardcodes pardiso_lu (scripts/pardiso_solver.py, one pypardiso call
+# on the host) because jNO's own PARDISO backend aborts on this operator. Kept here only so it
+# shows up in the printed CONFIG line below; setting it changes nothing about how the solve runs.
+SOLVER="${SOLVER:-custom}"
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}"
 
 BUDGET=$(python3 -c "print(int($HOURS * 3600))")
@@ -67,6 +70,10 @@ echo "took 25.9 min -- 2.16 and 6.22 s/iteration. A LINEAR extrapolation says h=
 echo "would be ~50 s/iteration, i.e. ~2 h for 140. Treat that as a FLOOR, not an estimate: a sparse"
 echo "direct factorisation on a 3-D mesh fills in faster than linearly, and the h=0.10 run already"
 echo "came in 60 % above the linear prediction. Memory binds before wall clock does -- at ~285k DOFs"
-echo "the factor is several GB. If it thrashes or OOMs, drop to h=0.07 (~165k tets) or switch to"
-echo "SOLVER=cudss on a GPU node, which is the case cuDSS is built for (the sparsity pattern is"
-echo "constant across every iteration, so its symbolic plan is computed once)."
+echo "the factor is several GB. If it thrashes or OOMs, drop to h=0.07 (~165k tets)."
+echo
+echo "SOLVER=cudss will NOT help here -- corrected from an earlier version of this note. bracket.py"
+echo "hardcodes the solve through pardiso_lu regardless of SOLVER; there is no cuDSS path without"
+echo "changing that code, and doing so is untested against the crash pardiso_lu exists to avoid."
+echo "See cluster/calibrate.sh for what actually moves the needle on a GPU node (thread count,"
+echo "GPU-assisted assembly) with the code as it stands today."

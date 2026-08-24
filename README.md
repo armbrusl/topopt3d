@@ -25,10 +25,11 @@ Concretely, these previously published numbers are withdrawn:
 | "the aspect constraint now ends at 0.47" | `477bccd` message | void — same cause |
 | every `.npz`, console and figure in `runs/` | — | regenerate; all predate the fix |
 
-The direction of the E-FEM conclusion survived re-measurement and got **stronger**, but no number
-from before the fix should be quoted. The acceptance test that now guards this is in *Honesty checks
-built in*: a Lagrange run must reproduce its own reported compliance under an independent solve to
-**0.00 %** at every frame.
+The direction of the E-FEM conclusion survived re-measurement and, on a fully binary design (see
+below), got stronger still — though the specific pre-projection numbers this paragraph originally
+pointed to are themselves superseded. No number from before the support-drift fix should be quoted.
+The acceptance test that guards this is in *Honesty checks built in*: a Lagrange run must reproduce
+its own reported compliance under an independent solve to **0.00 %** at every frame.
 
 ## What the reanalysis measures
 
@@ -37,40 +38,82 @@ meshes of the identical geometry. Midpoint subdivision is exact on planar facets
 the same body; linear tets are stiff and refinement can only soften them, so each level is a
 one-sided LOWER bound and no converged value is needed to draw a conclusion.
 
-Refined to 4M tets on the h = 0.25 pair — same mesh, load, supports, material budget and iteration
-count, the element formulation the only difference:
+**A second retraction, found while pursuing the first.** Every result below the fold measured before
+20 Aug used `BETA_H > 0` and none of it should be trusted either: the projection's sharpness `beta`
+was a Python float captured in a `rho.constrain(...)` closure, and since jNO's step-program cache
+started reusing compiled steps across `solve()` calls, mutating that closure to ramp `beta` changed
+nothing the cache could see. The gradient stayed at the STARTING sharpness for the whole run while
+`crux.eval` recompiled and reported the ramped one — a rising `beta_H` and a falling grey-level
+indicator in the log, describing a design optimised at beta = 1 throughout. Fixed in jNO
+(`ModelCall.project` — beta as a traced parameter node — plus a step-key fix so a mutated
+reparameterisation constant is actually seen); `bracket.py` now uses it via
+`jno.optimizers.heaviside_continuation`.
+
+With that fixed, the h = 0.25 pair converges genuinely binary — `M_nd` 0.0001 / 0.0000, and the grey
+fraction (density strictly between 0.1 and 0.9) is **exactly 0.0000** for both, which was never true
+of any earlier result. That matters because it closes the obvious objection to the number below: it
+cannot be an artifact of the Lagrange design being grey, because it is not grey at all.
+
+Reanalysed at level 3 (~500k tets), same mesh, load, supports, material budget and iteration count,
+the element formulation the only difference:
+
+| | reported | refined solve (level 3, ~500k tets) | understates by |
+|---|---|---|---|
+| conventional (Lagrange) | 4.1814 | **≥ 27.8739** | **≥ 567 %** |
+| **E-FEM** (`SPACE=cover`) | 5.4154 | **≥ 6.1964** | **≥ 14.4 %** |
+
+The cleanest form needs no cross-design comparison at all. Take ONE body — the E-FEM design — and
+read it two ways against its own refined solve (≥ 6.1964):
+
+* its own **E-FEM** solve, 5.4154 → **−12.6 %**
+* a plain **P1** solve of the identical mesh and density, 4.6485 → **−25.0 %**
+
+**E-FEM's error is roughly 2× smaller on the same configuration**, and the material-model step in
+isolation (SIMP field → extracted solid, same mesh, no refinement) makes the same point more
+sharply: **+185 %** for Lagrange against **+5.37 %** for E-FEM. For reference their 2-D Fig. 7 is
+−0.5 % with E-FEM and +17.6 % without; our conventional case is far worse than theirs even on a
+fully binary design.
+
+**Retraction of the retraction's own headline number.** The pre-projection level-3/level-4 pass
+(below) reported E-FEM's own solve as −1.2 %, "faithful", and called that number stronger than the
+grey one. It was not stronger — it was flattered by greyness in exactly the way the material-model
+control now shows: a design with 4–6 % grey volume reads better than the same formulation on a
+binary design, for the same reason Lagrange's grey design read far better than it should have. The
+correct comparison is always binary-vs-binary, above.
+
+Distortion is still not the mechanism: the equal-element-count control (same geometry, same
+resolution, undistorted tets) reads **+6.16 %** for Lagrange and **−0.26 %** for E-FEM — both small
+next to the 185 % and 5.37 % the material model alone contributes.
+
+**Read the bounds as bounds — both are still climbing.** At level 3 the Lagrange series is moving
++16.56 % between the last two levels, E-FEM +6.39 %, so neither is converged and the true gap is
+almost certainly wider than the table shows. The convergence RATE from the earlier (pre-projection)
+pass — increments settling to a ratio of ~0.5, i.e. O(h¹), the signature of re-entrant edges in a
+faceted body rather than the O(h²) a smooth one gives — has not been re-measured on the binary pair
+and should not be assumed to transfer; recalibrate before trusting a cheap extrapolation here.
+
+`python scripts/fig_convergence.py` draws the earlier (grey, level-4) convergence series;
+`python scripts/fig_grey.py` draws the density histogram that motivated re-running it, and shows
+directly why the iso-level slider on a projected console does nothing — there is no grey left for it
+to threshold through.
+
+**A warm start does not substitute for running E-FEM throughout.** Loading a converged Lagrange
+design into an E-FEM run (`WARMSTART=<npz>`, same mesh, same connectivity, no transfer) and
+optimising 250 further iterations at Lagrange's own cost profile halved the damage (truth
+≥ 27.87 → ≥ 13.55) but landed 2.2× short of E-FEM run from scratch (≥ 6.20 on the pre-projection
+pair), and kept Lagrange's perimeter and roughness rather than converging toward E-FEM's own. The
+formulation has to be right while the topology is still forming, not applied as a late correction.
+
+### Superseded (pre-projection) pass — kept for the convergence-rate measurement only
+
+The 4M-tet convergence series and the O(h¹) rate above were measured before the projection fix, on a
+grey pair (`M_nd` 0.06 / 0.04). The compliance numbers from that pass are superseded by the binary
+table above and must not be quoted on their own:
 
 | | reported | refined solve (4M tets) | understates by |
 |---|---|---|---|
-| conventional (Lagrange) | 4.8591 | **≥ 17.0401** | **≥ 251 %** |
-| **E-FEM** (`SPACE=cover`) | 6.0357 | **≥ 6.1108** | **≥ 1.2 %** |
-
-The cleanest form of it needs no extrapolation at all. Take ONE body — the E-FEM design — and read
-it two ways against its own refined solve (≥ 6.1108):
-
-* its own **E-FEM** solve, 6.0357 → **−1.23 %**
-* a plain **P1** solve of the identical mesh and density, 5.1628 → **−15.51 %**
-
-**E-FEM's error is 12.6× smaller on the same configuration.** For reference their 2-D Fig. 7 is
-−0.5 % with E-FEM and +17.6 % without.
-
-The mechanism is **not** element distortion: the equal-element-count control (same geometry, same
-resolution, undistorted tets) reads +0.93 % and −0.95 %. It is material. At ρ > 0.5 the Lagrange
-design retains only 2.3194 of its 3.80 at h = 0.15 — its stiffness leans on grey density that
-becomes nothing when the design is made a real solid — against E-FEM's 3.7050 of 3.82. And the
-Lagrange design's true compliance is ~3× the E-FEM design's for identical material, so it is not
-merely misreported, it is worse.
-
-**Read the bounds as bounds.** The increments settle to a ratio of ~0.5, i.e. O(h¹) — the rate a
-faceted body with re-entrant edges gives, not the O(h²) of a smooth one. That is why five levels
-were needed. Extrapolating from the settled ratio: Lagrange ~18.6, E-FEM ~6.26.
-
-Level 4 (4M tets) needs a large machine, but it only has to be paid ONCE per problem class: with the
-ratio calibrated, level 3 (500k tets, and a workstation) reproduces it to +0.2 % / −2.4 %. Using each
-series' own unsettled ratio at level 3 does not (+4.5 % / +22.3 %) — the calibration is what makes
-the cheap version trustworthy.
-
-`python scripts/fig_convergence.py` draws it.
+| conventional (Lagrange) | 4.8591 | ≥ 17.0401 | ≥ 251 % (superseded — see above) |
+| E-FEM (`SPACE=cover`) | 6.0357 | ≥ 6.1108 | ≥ 1.2 % (superseded — flattered by greyness) |
 
 Two further defects found while re-measuring, both fixed:
 

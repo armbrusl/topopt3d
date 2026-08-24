@@ -313,23 +313,24 @@ else:
 
 # --- design variable 1 -----------------------------------------------------------------------
 # SPACE=cover turns on E-FEM (the paper's Sec. 2.2, eq. 6-11). It is not cosmetic. Measured on the
-# corrected h=0.25 pair -- identical mesh, load, supports, material budget and iteration count, the
-# formulation the only difference -- against an independent solve of the geometry each design
-# actually produced:
+# corrected h=0.25 pair WITH PROJECTION ON (BETA_H>0, so both designs converge fully binary, M_nd
+# 0.0001 / 0.0000, zero grey volume) -- identical mesh, load, supports, material budget and
+# iteration count, the formulation the only difference -- against an independent solve of the
+# geometry each design actually produced:
 #
-#     Lagrange   reported 4.8591,  its extracted solid refines to >= 17.0401   (understates >= 251 %)
-#     E-FEM      reported 6.0357,  its extracted solid refines to >=  6.1108   (understates >=   1.2 %)
+#     Lagrange   reported 4.1814,  its extracted solid refines to >= 27.8739   (understates >= 567 %)
+#     E-FEM      reported 5.4154,  its extracted solid refines to >=  6.1964   (understates >=  14.4 %)
 #
-# Refined to 4M tets, where the series' increments finally settle to a ratio of ~0.5 -- O(h^1), the
-# rate a faceted body with re-entrant edges gives, not the O(h^2) a smooth one would. Extrapolating
-# from that: Lagrange ~18.6, E-FEM ~6.26.
+# A grey-design pass (BETA_H=0) run earlier gave 251 % / 1.2 % and read as "E-FEM nearly faithful" --
+# that reading does not survive: E-FEM's grey design was ALSO flattered by greyness, just less than
+# Lagrange's. The binary numbers above are the ones to quote. Both bounds are still climbing at the
+# finest level measured (+16.56 % / +6.39 % for the last refinement step), so both undersell the
+# true gap further. See README.md, "What the reanalysis measures", for the full derivation.
 #
-# The mechanism is not element distortion (the equal-count control gives +3.67 % and -0.09 %), it is
-# material: at rho>0.5 the Lagrange design retains only 3.3836 of its 3.8159, so 11.3 % of it is grey
-# that thresholding destroys, against 1.8 % for E-FEM. Their 2-D Fig. 7 is the same shape: +17.6 %
-# without it, -0.5 % with.
-#
-# Both bounds are one-sided and still climbing, so read them as ">=" and not as converged values.
+# The mechanism is not element distortion (the equal-count control gives +6.16 % and -0.26 %); the
+# material-model step alone (SIMP field -> extracted solid, same mesh, no refinement) is +185 % for
+# Lagrange against +5.37 % for E-FEM. Their 2-D Fig. 7 is the same shape: +17.6 % without it, -0.5 %
+# with -- our conventional case is far worse than theirs even fully binary.
 # An earlier "+29.0 % attributable" claim measured here is WITHDRAWN -- it predates the support-drift
 # fix and was computed against a compliance the optimiser could not reproduce.
 u, phi = d.fem_symbols(value_shape=(3,), **({"space": "cover"} if SPACE == "cover" else {}))

@@ -78,14 +78,31 @@ else
     export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 fi
 
-# The linear solve is PARDISO on the host here (scripts/bracket.py imports pardiso_solver directly),
-# so the GPU is requested for the assembly/AD side only. Drop --gres if the queue is tight.
+# NOTE: SOLVER here does NOTHING for bracket.py. It hardcodes `pardiso_lu` from
+# scripts/pardiso_solver.py -- one `pure_callback` straight into pypardiso -- because jNO's own
+# `lu(backend="pardiso")` aborts the process (glibc double free) on this exact operator, a P0
+# density behind `rho.constrain(d.patch_filter())`; see that file's docstring. `SOLVER` is read
+# only by scripts/run.py, a different script this job does not call. Left exported (harmless) in
+# case a future problem script does read it, but do not expect it to change bracket.py's behaviour.
+#
+# CONSEQUENCE: the linear SOLVE always runs on the host via pypardiso, whatever GPU is attached.
+# The GPU is used for assembly/AD only, automatically, whenever CUDA_VISIBLE_DEVICES makes one
+# visible -- there is no separate switch for that either. Routing the solve itself through cuDSS
+# would need bracket.py changed to call `fem.integrate(solver=...)` with a cuDSS backend instead of
+# the hardcoded `pardiso_lu`, and that is UNTESTED against the same crash this file exists to avoid
+# -- cuDSS may or may not hit it. cluster/calibrate.sh measures what the CURRENT code gets (host
+# solve + GPU assembly) before anyone spends time wiring in an alternative solve path.
 export SOLVER="${SOLVER:-custom}"
 
 export HMESH="${HMESH:-0.10}"
 export WASHER="${WASHER:-0.25}"     # reproduces the 1,084-tet passive set of the h=0.25 pair
 export EYE="${EYE:-0.30}"           # ditto -- these two ARE the problem definition, not tuning
-export BETA_H="${BETA_H:-0}"        # no Heaviside: the ramp needs >250 iterations to re-converge
+# Heaviside projection is now safe to turn on (jno.optimizers.heaviside_continuation actually
+# reaches the gradient; the earlier hand-rolled ramp did not). Off by default here because the
+# comparison this job runs is the reanalysis baseline, not the binary-design one -- turning it on
+# changes what is being measured, not just how long it takes. BETA_H=16 BETA_AT=0.7 with a longer
+# ITERS (750 measured C1 at h=0.25; scale up for h=0.10) reproduces the binary result.
+export BETA_H="${BETA_H:-0}"
 export PSTAR="${PSTAR:-0}"          # no perimeter barrier, so the two runs differ in ONE thing
 export ITERS="${ITERS:-250}"
 # BUDGET IS A HARD STOP, AND ITS DEFAULT IS 2 HOURS. `bracket.py` loops on

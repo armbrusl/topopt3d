@@ -57,20 +57,36 @@ cannot be an artifact of the Lagrange design being grey, because it is not grey 
 Reanalysed at level 3 (~500k tets), same mesh, load, supports, material budget and iteration count,
 the element formulation the only difference:
 
-| | reported | refined solve (level 3, ~500k tets) | understates by |
+| | reported | refined solve (level 3, ~430-480k tets) | understates by |
 |---|---|---|---|
-| conventional (Lagrange) | 4.1814 | **≥ 27.8739** | **≥ 567 %** |
-| **E-FEM** (`SPACE=cover`) | 5.4154 | **≥ 6.1964** | **≥ 14.4 %** |
+| conventional (Lagrange) | 4.1814 | **≥ 111.6403** | **≥ 2570 %** |
+| **E-FEM** (`SPACE=cover`) | 5.4154 | **≥ 6.9713** | **≥ 28.7 %** |
+
+**A third retraction, and the reason this table moved.** The numbers here previously read ≥ 567 %
+and ≥ 14.4 %. They were measured with an extraction that flattered both designs, and flattered the
+conventional one 2.6x harder. `reanalysis_boundary.py` chose its iso-level by bisecting on retained
+VOLUME until the extracted body carried the design's own material. That is correct on a grey design.
+On a BINARY one it is degenerate: every level in (0,1) selects the same tets, so the only way the
+search can meet the volume target is to drive the level toward zero and admit VOID tets — which the
+reanalysis then re-solves as fully solid. The void wisps a SIMP design leaves behind sit exactly
+where its members almost touch, so they became load-bearing bridges the design does not contain.
+Measured on the h = 0.10 binary Lagrange design, the bisection settled at rho > 0.000016 on a body
+9.6 % void by volume; extracting the same design honestly at rho > 0.5 made it 3.2x more compliant.
+Binary designs are now extracted at rho > 0.5 and the material the manifold repair drops is REPORTED
+as the fragmentation measure it is (`scripts/tests/test_extraction_level.py`). Grey designs keep the
+volume-preserving path, which is right for them.
 
 The cleanest form needs no cross-design comparison at all. Take ONE body — the E-FEM design — and
-read it two ways against its own refined solve (≥ 6.1964):
+read it two ways against its own refined solve (≥ 6.9713):
 
-* its own **E-FEM** solve, 5.4154 → **−12.6 %**
-* a plain **P1** solve of the identical mesh and density, 4.6485 → **−25.0 %**
+* its own **E-FEM** solve, 5.4154 → **−22.3 %**
+* a plain **P1** solve of the identical mesh and density, 4.6485 → **−33.3 %**
 
-**E-FEM's error is roughly 2× smaller on the same configuration**, and the material-model step in
-isolation (SIMP field → extracted solid, same mesh, no refinement) makes the same point more
-sharply: **+185 %** for Lagrange against **+5.37 %** for E-FEM. For reference their 2-D Fig. 7 is
+**E-FEM's error is 1.49× smaller on the same configuration.** That factor is weaker than the ~2×
+this section claimed before the extraction fix, and it is the one number in this README that the fix
+made WORSE rather than better — recorded here rather than quietly dropped. The material-model step in
+isolation (SIMP field → extracted solid, same mesh, no refinement) is where the separation actually
+lives: **+578 %** for Lagrange against **+14.4 %** for E-FEM. For reference their 2-D Fig. 7 is
 −0.5 % with E-FEM and +17.6 % without; our conventional case is far worse than theirs even on a
 fully binary design.
 
@@ -82,15 +98,22 @@ binary design, for the same reason Lagrange's grey design read far better than i
 correct comparison is always binary-vs-binary, above.
 
 Distortion is still not the mechanism: the equal-element-count control (same geometry, same
-resolution, undistorted tets) reads **+6.16 %** for Lagrange and **−0.26 %** for E-FEM — both small
-next to the 185 % and 5.37 % the material model alone contributes.
+resolution, undistorted tets) reads **+4.98 %** for Lagrange and **−0.05 %** for E-FEM — both small
+next to the 578 % and 14.4 % the material model alone contributes. Read that control with its own
+caveat, which the script prints: the extracted solid is 0.3-0.5 % interior nodes at h = 0.25, so a
+refill has almost no alternative tetrahedralisation to find. It says distortion had no room to
+operate at this resolution, NOT that distortion is harmless.
 
 **Read the bounds as bounds — both are still climbing.** At level 3 the Lagrange series is moving
-+16.56 % between the last two levels, E-FEM +6.39 %, so neither is converged and the true gap is
-almost certainly wider than the table shows. The convergence RATE from the earlier (pre-projection)
-pass — increments settling to a ratio of ~0.5, i.e. O(h¹), the signature of re-entrant edges in a
-faceted body rather than the O(h²) a smooth one gives — has not been re-measured on the binary pair
-and should not be assumed to transfer; recalibrate before trusting a cheap extrapolation here.
++32.55 % between the last two levels, E-FEM +7.28 %, so neither is converged and the true gap is
+almost certainly wider than the table shows. The increment ratio is now measured on the binary pair
+and it does NOT reproduce the ~0.5 (O(h¹)) of the earlier grey pass: the increments are non-monotone
+— 20.45, 33.99, 27.42 for Lagrange and 0.479, 0.704, 0.473 for E-FEM — so the series is not yet in
+its asymptotic regime and the level 2→3 ratios (0.807 and 0.672) are the first that could mean
+anything. Extrapolating geometrically from them gives ~226 (Lagrange) and ~7.94 (E-FEM), but a ratio
+of 0.807 sits close enough to 1 that the Lagrange figure is not trustworthy — a small error in the
+ratio moves it enormously. **Quote the bounds, not the extrapolations**, and treat the Lagrange
+series as unconverged rather than assigning it a value.
 
 `python scripts/fig_convergence.py` draws the earlier (grey, level-4) convergence series;
 `python scripts/fig_grey.py` draws the density histogram that motivated re-running it, and shows
@@ -99,10 +122,21 @@ to threshold through.
 
 **A warm start does not substitute for running E-FEM throughout.** Loading a converged Lagrange
 design into an E-FEM run (`WARMSTART=<npz>`, same mesh, same connectivity, no transfer) and
-optimising 250 further iterations at Lagrange's own cost profile halved the damage (truth
-≥ 27.87 → ≥ 13.55) but landed 2.2× short of E-FEM run from scratch (≥ 6.20 on the pre-projection
-pair), and kept Lagrange's perimeter and roughness rather than converging toward E-FEM's own. The
-formulation has to be right while the topology is still forming, not applied as a late correction.
+optimising 250 further iterations at Lagrange's own cost profile recovers most of the gap but not
+all of it. Re-measured with the corrected extraction, at level 3:
+
+| | reported | truth ≥ | understates ≥ |
+|---|---|---|---|
+| conventional, cold | 4.1814 | 111.6403 | 2570 % |
+| E-FEM, warm-started from it | 6.9955 | 18.4096 | 163 % |
+| E-FEM, from scratch | 5.4154 | 6.9713 | 28.7 % |
+
+The warm start is a 6.1× improvement on the cold conventional design and still lands **2.6× short**
+of running E-FEM from the beginning, while keeping Lagrange's perimeter and roughness rather than
+converging toward E-FEM's own. Read the middle row with one caveat: it ran 250 iterations against
+the other two rows' 750, so some of its remaining gap is unspent budget rather than the warm start
+as such. The direction is not in doubt — the formulation has to be right while the topology is still
+forming — but the exact 2.6× would need a 750-iteration warm run to pin down.
 
 ### Superseded (pre-projection) pass — kept for the convergence-rate measurement only
 

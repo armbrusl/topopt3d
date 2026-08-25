@@ -12,7 +12,13 @@ a density field at all.
 
 That is reproducible exactly here, because a tetrahedral element boundary is piecewise PLANAR:
 
-  1. threshold rho -- the level chosen so the retained tets carry the design's own material volume;
+  1. threshold rho. On a GREY design the level is chosen so the retained tets carry the design's
+     own material volume. On a BINARY one that criterion is degenerate and flatters the design --
+     every level in (0,1) picks the same tets, so the search can only meet the volume target by
+     dropping toward zero and admitting void, which is then re-solved as solid and bridges gaps the
+     design does not close. Binary designs are therefore extracted at rho > 0.5 and the material the
+     repair drops is REPORTED, as the fragmentation measure it is. `BINARY_MND` sets the cutoff;
+     `LEVEL=` overrides both.
   2. keep the largest face-connected piece, then drop tets until the boundary is a closed manifold;
   3. subdivide each boundary triangle 1 -> 4 at edge midpoints. Planar facets, so this changes the
      geometry by NOTHING -- it only buys resolution;
@@ -39,6 +45,7 @@ enrichment on a frozen configuration.
     RUN=topo3d_h25_cover.npz python scripts/reanalysis_boundary.py
     RUN=topo3d_h25_cover.npz REFINE=3 python scripts/reanalysis_boundary.py   # deeper series
     RUN=topo3d_h25_cover.npz LEVEL=0.5 python scripts/reanalysis_boundary.py   # fixed level instead
+    RUN=topo3d_hv_cover.npz BINARY_MND=0 python scripts/reanalysis_boundary.py  # force the old path
 """
 
 import collections
@@ -173,8 +180,32 @@ def extract(tau, log=False):
     return _manifold(mask, log)
 
 
+M_ND = float((4 * rho * (1 - rho)).mean())
+BINARY_MND = float(os.environ.get("BINARY_MND", "0.01"))
+IS_BINARY = M_ND < BINARY_MND
+
 if LEVEL is not None:
-    TAU = float(LEVEL)
+    TAU, WHY = float(LEVEL), "requested"
+elif IS_BINARY:
+    # A BINARY design makes the volume-preserving bisection degenerate, and degenerate in a
+    # direction that FLATTERS the design. Every level in (0,1) selects the same tets, so the only
+    # way the search can raise the retained volume to meet M_TARGET is to drive the level toward
+    # zero -- which admits VOID tets. Those are then re-solved as fully solid material, and because
+    # the void wisps a SIMP design leaves behind sit exactly where its members almost touch, they
+    # act as load-bearing bridges that the design does not actually contain.
+    #
+    # Measured on topo3d_h10b_Lagrange (M_nd 0.0004), 24 Aug 2026: the bisection settled at
+    # rho > 0.000016 and produced a body that was 9.6 % void by volume, whose compliance was
+    # 5.8716. Extracting the same design at rho > 0.5 gives 18.7890 -- 3.2x stiffer on paper for
+    # want of bridges that are not there. The reported understatement moved from >=94.4 % to
+    # >=648.6 %. The h=0.25 pair moved >=567 % -> >=1914 % (Lagrange) and >=14.4 % -> >=20.0 %
+    # (cover); the correction is ~2.6x heavier on the Lagrange side, so it is NOT a common factor
+    # that cancels in the comparison.
+    #
+    # So: on a binary design the honest level is 0.5, and the material the repair then drops is a
+    # PROPERTY OF THE DESIGN -- fragmentation and non-manifold thinness -- to be reported, not a
+    # deficit to be made up by lowering the threshold until the arithmetic balances.
+    TAU, WHY = 0.5, f"binary design, M_nd {M_ND:.4f} < {BINARY_MND}"
 else:
     lo, hi = 0.0, 1.0
     for _ in range(24):
@@ -183,10 +214,18 @@ else:
             lo = mid
         else:
             hi = mid
-    TAU = lo
+    TAU, WHY = lo, "volume-preserving"
 mask = extract(TAU, log=True)
-print(f"  volume-preserving level rho > {TAU:.4f}: {int(mask.sum())} tets, "
-      f"vol {V[mask].sum():.4f} ({100 * (V[mask].sum() / M_TARGET - 1):+.2f}% vs the design's material)")
+_kept = V[mask].sum()
+print(f"  level rho > {TAU:.4f} [{WHY}]: {int(mask.sum())} tets, "
+      f"vol {_kept:.4f} ({100 * (_kept / M_TARGET - 1):+.2f}% vs the design's material)")
+if IS_BINARY and LEVEL is None:
+    # The shortfall IS the result here, so state it rather than leaving it as a percentage to be
+    # read past. It is material the design holds that no connected, manifold body can carry.
+    _solid = V[rho > 0.5].sum()
+    print(f"  shortfall: the design holds {_solid:.4f} of solid, of which "
+          f"{_solid - _kept:.4f} ({100 * (_solid - _kept) / _solid:.1f} %) is disconnected debris or "
+          f"non-manifold junction that the extraction cannot keep")
 # The level only means something if the answer does not swing with it. On a binary design it does not.
 probe = [(t, extract(t)) for t in (0.3, 0.5, 0.7)]
 print("  sensitivity to the level: " + ", ".join(

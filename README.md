@@ -7,6 +7,43 @@ whose §2.3.2 leaves the tetrahedral case open. Built on [jNO](https://github.co
 The design vector is `[rho, d_x, d_y, d_z]`: one density per tetrahedron plus the position of every
 interior node. Every sensitivity comes from AD; nothing is hand-derived.
 
+## Where things are
+
+```
+scripts/
+  bracket.py              the main experiment: tapered bracket, 2 bolt holes, oblique pull.
+                          Everything quoted in this README comes from here.
+  torsion.py  heattree.py  minimal.py  run.py     the other four problems.
+  reanalysis_boundary.py  the independent check -- extracts the design's own boundary as a
+                          SOLID and re-solves it on refined meshes. Read its docstring first;
+                          it is where the measurement protocol lives.
+  reanalysis3d.py         the older density-resampling variant. Superseded by the above.
+  pardiso_solver.py       MKL PARDISO through one pure_callback with a hand-written adjoint.
+  export_console.py       -> runs/console_<TAG>.html, the interactive 3-D viewer.
+  fig_*.py                the figures.
+  cluster_report.py       reads a run's npz + logs and checks four SILENT failure modes.
+                          Run it on anything before believing it.
+  topopt/                 shared layer -- WRITTEN AND TESTED BUT NOT YET WIRED IN.
+                          See the STATUS block in its __init__.py before building on it.
+  problems/               empty placeholder. See its README.md.
+  tests/                  pytest; fast, no GPU, no data files needed.
+cluster/                  SLURM jobs and a calibration script.
+vendor/jNO/               the pinned jNO submodule (branch feat/topopt-3d).
+runs/                     ALL OUTPUT. Not tracked -- see below.
+```
+
+**`runs/` is deliberately not in git** (`.gitignore`), so a fresh clone contains **no results**: no
+`.npz`, no figures, no consoles. Nothing in this README can be re-checked without first re-running
+the optimisation that produced it, which for the fine cases is hours on a cluster. If you have been
+handed this repo to continue the work, ask for the `.npz` files as a separate transfer — the binary
+pair (`topo3d_hv_Lagrange.npz`, `topo3d_hv_cover.npz`, `topo3d_h10b_Lagrange.npz`) is ~10 MB and is
+enough to reproduce every reanalysis, figure and console here without re-optimising anything.
+
+**Start by reading**, in this order: this README's retraction sections (they explain why several
+obvious-looking numbers are wrong), then `scripts/reanalysis_boundary.py`'s module docstring, then
+`scripts/bracket.py` top to bottom. The docstrings carry the reasoning; the code alone will not tell
+you why a bound is chosen.
+
 ## Retraction: every 3-D result before commit `477bccd` is void
 
 The relocation predicate was a bounding box over the interior nodes, so it also promoted **175
@@ -198,7 +235,10 @@ Already cloned without `--recurse-submodules`? `git submodule update --init`.
 
 Everything lands in `runs/`. Set `OUTDIR=/scratch/...` to send it elsewhere.
 
-### On the H200 cluster
+### On the cluster
+
+The machine actually used for the fine runs is **`ki2`: 32-core Xeon Gold 6334, 2x NVIDIA A100 80GB
+PCIe** — not an H200. `cluster/h200.sbatch` keeps its name for history; read it as "the cluster job".
 
 ```bash
 git clone --recurse-submodules git@github.com:armbrusl/topopt3d.git && cd topopt3d
@@ -207,8 +247,23 @@ sbatch cluster/h200.sbatch                            # SOLVER=cudss, HMESH=0.10
 PSTAR=<0.76*P> BUDGET=3000 TAG=h200 sbatch cluster/h200.sbatch
 ```
 
-Try **`SOLVER=cudss` first** — see *Cost* below for why. If it is unavailable or misbehaves,
-`SOLVER=""` uses the default backend, which always works.
+`SOLVER` is read by **`scripts/run.py` only**, which is what `h200.sbatch` launches. It has NO effect
+on `scripts/bracket.py`, which hardcodes `pardiso_lu` (see `scripts/bracket.py:497`) — setting
+`SOLVER=cudss` for a bracket run does nothing at all. Try **`SOLVER=cudss` first** for `run.py`; if
+it is unavailable or misbehaves, `SOLVER=""` uses the default backend, which always works.
+
+**Two measured limits worth knowing before you burn a slot** (24 Aug 2026):
+
+* **The GPU is slower than the CPU at real problem size.** On a small calibration mesh (h=0.35) GPU
+  assembly won, 3.6 vs 4.4 s/iter, and `cluster/calibrate.sh` will tell you so. At h=0.10 with
+  `SPACE=cover` the same configuration ran **80 s/iter on GPU against 53 s/iter on CPU**. Calibrate
+  at the size you intend to run, not at a cheap one — and note `calibrate.sh` uses `CHUNK=$ITERS`, a
+  single chunk, so it does not see the per-chunk recompilation a real `CHUNK=50` run pays.
+* **`HMESH=0.10 SPACE=cover` will not compile on a 62 GB workstation.** It is OOM-killed (exit 137)
+  during "JIT compiling step function", right after iteration 0 — reproduced twice with nothing else
+  running and 47 GB free. Steady-state RSS once running is only ~12.8 GB, so sizing headroom from
+  what you observe after iteration 0 badly under-predicts the compile-time peak. Run it on the
+  cluster. The h=0.10 *Lagrange* run is fine locally: 3.78 s/iter, 750 iterations in 57 min.
 
 ## The pinned jNO branch
 
@@ -240,9 +295,11 @@ it. A 3-D **edge fan** is `6T/E ≈ 5.2`, where the formula is at its *sharpest*
 vertex patch it was designed for. Around an interior edge a tet has exactly two faces containing
 both endpoints, so the fan is a **cycle** and eq. (18)'s walk is well defined with no angular sort.
 
-## Cost, and what an H200 changes
+## Cost, and what a datacenter GPU changes
 
-Measured on a 20-core CPU + RTX 3070 (8 GB), per design iteration:
+Measured on a 20-core CPU + RTX 3070 (8 GB), per design iteration. These are **solver** benchmarks
+on `run.py`'s path; for what a GPU does to a whole `bracket.py` iteration see the measured limits
+under *On the cluster* above, which point the other way at h=0.10.
 
 | tets | default backend | `solver=lu(backend="pardiso")` |
 |---|---|---|
@@ -256,11 +313,12 @@ differs by **46-125x** and widens with size. Two reasons: the stiffness is SPD (
 5.6e-17) while the default applies a general LU, and **the sparsity never changes** — relocation
 moves nodes, not connectivity — so the symbolic analysis is valid for all 400 iterations.
 
-**On an H200 the first thing to try is `backend="cudss"`.** It is a different backend, so it is not
-subject to the blocker below; 141 GB of HBM removes the fill-in ceiling that bounds sparse-direct on
-an 8 GB card; and this problem is its ideal case (cached symbolic plan, values-only re-factorisation
-every iteration). `pixi install -e fem` does not bring it — install cuDSS on the cluster and pass
-`SOLVER=cudss`.
+**On a datacenter card the first thing to try is `backend="cudss"`.** It is a different backend, so
+it is not subject to the blocker below; the A100's 80 GB of HBM removes the fill-in ceiling that
+bounds sparse-direct on an 8 GB card; and this problem is its ideal case (cached symbolic plan,
+values-only re-factorisation every iteration). `pixi install -e fem` does not bring it — install
+cuDSS on the cluster and pass `SOLVER=cudss` (to `run.py`; `bracket.py` ignores it). **Untested** —
+this remains a recommendation, not a measurement.
 
 **An iterative solver is not the shortcut it looks like.** SA-AMG + CG with elasticity's
 near-nullspace converges (residual 1e-11) but needs 103-145 CG iterations against the 1e3 SIMP

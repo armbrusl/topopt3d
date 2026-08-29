@@ -252,8 +252,14 @@ What resolution does not repair is the gap between what a run reports and what i
 
 **Read the levels, not just the percentages.** These are one-sided bounds that rise with refinement,
 so they are floors and they are *not* like-for-like: the fixed row is a level-1 bound because its
-extracted body is 16,382 tets and a level-3 refill is ~6M, which does not fit on a 62 GB workstation
-(three attempts at level 2 were killed by memory pressure from other jobs on the same machine). The
+extracted body is 16,382 tets, and even **level 2** does not fit on a 62 GB workstation. That was
+measured, not assumed — eight attempts, each killed at the same point, and each one moving the
+ceiling rather than repeating: `FEMCHUNK` cleared assembly, `LINSOLVE=iterative` cleared the direct
+factorisation (a level-2 refill is 777,750 tets / 472,980 dofs, and a sparse LU of 3-D elasticity
+fills in far past 62 GB), and `LEVEL_FROM=2` cleared the JAX state accumulated by levels 0 and 1.
+What remains is the **JIT compile** of the level-2 operator, which dies before the solve begins —
+the same compile-peak signature as the h = 0.10 cover run, whose peak runs several times its
+steady-state RSS. Level 2 needs the cluster. The
 fixed mesh's ≥ 308 % is the least converged figure in the table and would grow. The direction is not
 in doubt — E-FEM on the coarse deformable mesh is the only run whose reported number nearly survives
 contact with its own geometry, and it gets there with a single connected component and 2.5x fewer

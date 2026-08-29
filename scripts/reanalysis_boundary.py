@@ -46,6 +46,7 @@ enrichment on a frozen configuration.
     RUN=topo3d_h25_cover.npz REFINE=3 python scripts/reanalysis_boundary.py   # deeper series
     RUN=topo3d_h25_cover.npz LEVEL=0.5 python scripts/reanalysis_boundary.py   # fixed level instead
     RUN=topo3d_hv_cover.npz BINARY_MND=0 python scripts/reanalysis_boundary.py  # force the old path
+    RUN=topo3d_fxfine.npz REFINE=2 FEMCHUNK=64 python scripts/reanalysis_boundary.py  # low memory
 """
 
 import collections
@@ -82,6 +83,12 @@ PULL = PULL / np.linalg.norm(PULL)
 RUN = os.environ.get("RUN", "topo3d_h25_cover.npz")
 TAG = RUN.replace("topo3d_", "").replace(".npz", "")
 REFINE = int(os.environ.get("REFINE", "2"))  # levels of UNIFORM refinement of the extracted solid
+# Bounds the element-assembly batch, nothing else -- a pure MEMORY knob, so a chunked run must
+# return the identical compliance to an unchunked one. Needed because the refinement series grows
+# 8x per level: on a 62 GB workstation a level-2 refill of a 16k-tet body (~700k tets) is killed
+# during assembly while levels 0 and 1 fit easily. Verified against the unchunked reference on
+# this design -- level 0 = 20.7456 and level 1 = 29.3477 either way.
+FEMCHUNK = int(os.environ.get("FEMCHUNK", "0"))  # 0 = let jNO's own policy size the batch
 LEVEL = os.environ.get("LEVEL")  # fixed iso-level instead of the volume-preserving one
 
 r = np.load(os.path.join(OUT, RUN))
@@ -403,6 +410,7 @@ def compliance(P, C, rho_vals, tag):
             -1.0 * inner(jnp.asarray(PULL / area), phi.bind(**dict(zip("xyz", eye))), 1),
         ],
         quad_degree=2,
+        **({"chunk": FEMCHUNK} if FEMCHUNK > 0 else {}),
     )
     Cc = (E(rr) * a(eps(u), eps(u))).integrate(fem, solver=pardiso_lu)
     crux = jno.core([Cc], domain=jno.domain.from_array({"_": np.zeros((1, 1))}))

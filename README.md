@@ -194,7 +194,70 @@ Two further defects found while re-measuring, both fixed:
   3.11 against 4.07 that was bought rather than designed. The budget is now absolute
   (`VOLFRAC × V₀`, printed at startup) and boundary nodes only slide **tangentially**, so the blank
   is invariant to machine precision (12.717462 → 12.717462 with 665 nodes moving up to 0.331).
-* **`RELOCATE=0` is not a valid density-only ablation** on this problem — see *Knobs*.
+* **`RELOCATE=0` was not a valid density-only ablation** on this problem. It is now — see
+  *The fixed-mesh SIMP baseline* below.
+
+## The fixed-mesh SIMP baseline
+
+The paper's selling point is that a coarse deformable mesh beats a high-resolution fixed one. That
+comparison did not exist in 3-D until now, because `RELOCATE=0` would not run.
+
+**Why it would not run, and why the fix is not a convenience.** Pin the coordinates and `g_ang`,
+`g_asp` and `g_vmn` become *constants* — measured at h = 0.25 they sit at 1.001 / 0.415 / 1.734 for
+every one of 750 iterations. `g_ang` is a constant violated by 8.7e-4, and jNO's MMA guard refuses it
+by name: no step can satisfy a constraint whose gradient is identically zero. `g_vmx` survives that
+guard because eq. (26)'s cap `(2-rho)·V0MAX` is density-coupled — and it is the one that most has to
+go. On a fixed mesh it caps 421 of 4082 cells (10.3 %) below rho = 1, the tightest at rho ≤ 0.176,
+and **69 of those cells are in the non-design solid set**, pinned to rho = 1 by the problem
+definition rather than by the optimiser. The best aggregate any admissible density can reach is
+1.4705, worst cell 1.7343: the row is **infeasible**, not merely distorting. So `RELOCATE=0` now
+carries the volume budget alone, which is what fixed-mesh SIMP is. The quality figures are still
+evaluated and logged — a pinned run reports its dihedrals, it just does not pretend to control them.
+
+**What the baseline shows.** Threshold each converged design at rho > 0.5 and ask what its material
+is actually joined by. Two tetrahedra are *face*-connected when they share a whole triangle, which is
+what makes a weld carrying stress over an area; sharing only a node still couples DOFs in the FEM
+model, so the optimiser sees a connected structure either way.
+
+| | elements | pieces | largest holds | bolt 1 reached by |
+|---|---|---|---|---|
+| fixed, h = 0.25, conventional | 4,082 | 25 | 62.3 % | **a single vertex** |
+| fixed, h = 0.25, E-FEM | 4,082 | 20 | 61.2 % | 3 nodes, no shared face |
+| fixed, **h = 0.10**, conventional | 52,967 | 161 | **97.1 %** | solid, face to face |
+| deformable, h = 0.25, conventional | 4,082 | 12 | 97.0 % | solid, face to face |
+| deformable, h = 0.25, **E-FEM** | 4,082 | **1** | **100.0 %** | solid, face to face |
+
+On the coarse fixed mesh the material around the left bolt reaches the rest of the bracket through a
+chain of three contacts whose middle one is a **single shared vertex**. That vertex is a shared DOF,
+so it transmits force perfectly and the reported compliance is honest about the model that was
+solved; as an object it is a point carrying finite load, and non-manifold, so the boundary extraction
+cannot keep it. The extracted body therefore loses bolt 1 entirely and its refinement series never
+settles — 15.48 → 66.77 → 6.80 → 11.06, and level 2 came out 5.0591 on one run and 6.8000 on the
+next. **No compliance is quoted for those two designs**: the number would describe a one-bolt
+structure, not the design.
+
+**Resolution repairs the body, not the number.** The obvious objection — that a coarse fixed mesh is
+a straw man — is correct. At h = 0.10 the defect is gone: bolt 1 returns to the main body, which
+holds 97.1 % of the solid, debris falls from 45.3 % to 7.0 %, and the extracted body has 15.4 %
+interior nodes instead of 0 %. So the vertex junction is an artefact of **coarseness**, not of fixed
+meshes, and an earlier reading of this data that blamed mesh motion alone does not survive h = 0.10.
+
+What resolution does not repair is the gap between what a run reports and what its body does:
+
+| | dofs | reported | independent re-solve | understates by |
+|---|---|---|---|---|
+| fixed, h = 0.10 | 33,300 | 7.1843 | ≥ 29.3477 (level 1) | ≥ 308 % |
+| deformable, h = 0.25, conventional | 3,339 | 4.1814 | ≥ 111.6403 (level 3) | ≥ 2570 % |
+| deformable, h = 0.25, **E-FEM** | 13,356 | 5.4154 | ≥ 6.9713 (level 3) | **≥ 28.7 %** |
+
+**Read the levels, not just the percentages.** These are one-sided bounds that rise with refinement,
+so they are floors and they are *not* like-for-like: the fixed row is a level-1 bound because its
+extracted body is 16,382 tets and a level-3 refill is ~6M, which does not fit on a 62 GB workstation
+(three attempts at level 2 were killed by memory pressure from other jobs on the same machine). The
+fixed mesh's ≥ 308 % is the least converged figure in the table and would grow. The direction is not
+in doubt — E-FEM on the coarse deformable mesh is the only run whose reported number nearly survives
+contact with its own geometry, and it gets there with a single connected component and 2.5x fewer
+dofs than the fine fixed mesh — but a matched-level comparison needs the cluster.
 
 ## Run it
 
@@ -389,7 +452,7 @@ All via environment, so a cluster job needs no edits:
 | `CHUNK` | `10` | iterations between snapshots |
 | `SOLVER` | `custom` | MKL PARDISO via `scripts/pardiso_solver.py` — **recommended**. Also `""` (jNO default), `host`, `device`. Not `pardiso`: it aborts, see above |
 | `MOVING` | `1` | `0` freezes the mesh (density-only) |
-| `RELOCATE` | `1` | `bracket.py`: `0` skips `.trainable()` on the coordinates entirely. Note this problem is **not** solvable density-only as configured — the initial gmsh mesh violates the element-volume bound and only nodal motion can fix it, so MMA spends the run in feasibility restoration and compliance ends at 1.6e3–2.4e3. Relax `V0MAX_FRAC` before reading anything into a pinned run |
+| `RELOCATE` | `1` | `bracket.py`: `0` skips `.trainable()` on the coordinates entirely AND drops the four element-quality rows, which are constants of a fixed mesh (`g_vmx` is worse — infeasible). A pinned run is now a clean fixed-mesh SIMP baseline: volume budget only, converging binary in 69 s at h=0.25. See *The fixed-mesh SIMP baseline* |
 | `PENALP` | `1` | `0` uses a literal SIMP exponent — **required** while blocker 2 stands |
 | `PMASK` | `1` | solid non-designable material under the load |
 

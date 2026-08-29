@@ -12,6 +12,8 @@ thick 2-D one:
 
     PSTAR=0 python scripts/bracket.py      # probe: no barrier, measure the natural perimeter AREA
     PSTAR=<measured> python scripts/bracket.py
+    RELOCATE=0 python scripts/bracket.py   # fixed-mesh SIMP baseline: density only, nodes pinned,
+                                           # element-quality rows dropped (see the term list)
 
 Method: Jung, Yun & Kim, *Computers & Structures* **331** (2026) 108403 -- eq. (17)-(19) patch
 filter (3-D: edge fans), eq. (21)/(24) dihedral bounds, eq. (26)/(28) density-coupled element-volume
@@ -599,13 +601,49 @@ if PSTAR > 0:
     callbacks.append(
         jno.optimizers.geometric_decay(beta_p, GAMMA, start=BETA, minimum=BETA_MIN)
     )
-terms += [
-    jno.le(volume, 1.0),
-    jno.le(g_ang, 1.0),
-    jno.le(g_asp, 1.0),
-    jno.le(g_vmx, 1.0),
-    jno.le(g_vmn, 1.0),
-]
+# The four element-quality rows exist to keep a MOVING mesh valid. Pin the coordinates and every
+# one of them stops being a constraint on the optimiser and starts being a constraint on the
+# problem, so RELOCATE=0 carries the volume budget alone -- textbook fixed-mesh SIMP, which is
+# exactly what this ablation is supposed to be a baseline for.
+#
+# Measured at h=0.25 with the coordinates pinned, at iteration 0:
+#   g_ang = 1.001, g_asp = 0.415, g_vmn -- pure functionals of the coordinates, so on a fixed mesh
+#     they are CONSTANTS. g_ang is a violated one (by 8.7e-4, an artefact of gmsh's worst dihedral
+#     sitting at 15.23 deg against the 15 deg bound), and jNO refuses it by name: no step can
+#     satisfy a constraint whose gradient is identically zero. g_asp and g_vmn happen to start
+#     satisfied, so they would be accepted -- as no-ops that cost a Jacobian row per iteration.
+#   g_vmx = 1.815 -- the one row that is NOT constant, because eq. (26)'s cap (2-rho)*V0MAX is
+#     density-coupled, and the one that has to be dropped on FEASIBILITY grounds rather than
+#     taste. On a moving mesh it says "do not let a solid element grow", and the mesh can always
+#     comply by shrinking the offending element -- which is why RELOCATE=1 converges with it
+#     active at 0.98-1.00. Pin the coordinates and the element volumes are whatever gmsh chose,
+#     so the row becomes a cap on the DENSITY of cells the mesher happened to make large: at
+#     h=0.25, 421 of 4082 cells (10.3 %) may then never reach rho = 1, the tightest of them
+#     capped at rho <= 0.176. That alone would be a different problem. What settles it is that
+#     69 of those cells are in the NON-DESIGN solid set -- washer footprints and the rope eye,
+#     pinned to rho = 1 by the problem definition, not by the optimiser. Evaluate the aggregate
+#     at the best design the box bounds allow (rho = 1 where pinned, 1e-3 everywhere else) and
+#     it is 1.4705, with a worst cell at 1.7343: `g_vmx <= 1` is INFEASIBLE on this fixed mesh,
+#     unreachable by any admissible density. It is dropped with the others.
+#
+# They are still EVALUATED and logged every iteration below, so a fixed-mesh run still reports its
+# dihedrals and aspect ratios -- it just does not pretend to control them.
+terms.append(jno.le(volume, 1.0))
+if RELOCATE:
+    terms += [
+        jno.le(g_ang, 1.0),
+        jno.le(g_asp, 1.0),
+        jno.le(g_vmx, 1.0),
+        jno.le(g_vmn, 1.0),
+    ]
+else:
+    print(
+        "RELOCATE=0: the 4 element-quality rows are dropped -- 3 are constants of a fixed "
+        "mesh, and g_vmx is infeasible on one (69 non-design tets pinned to rho=1 already "
+        "violate it). Volume budget only; the quality figures below are reported, not "
+        "constrained.",
+        flush=True,
+    )
 crux = jno.core(terms, domain=jno.domain.from_array({"_": np.zeros((1, 1))}))
 
 coord_specs = list(getattr(d, "_trainable_coords", []) or [])

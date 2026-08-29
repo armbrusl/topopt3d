@@ -48,6 +48,7 @@ enrichment on a frozen configuration.
     RUN=topo3d_hv_cover.npz BINARY_MND=0 python scripts/reanalysis_boundary.py  # force the old path
     RUN=topo3d_fxfine.npz REFINE=2 FEMCHUNK=64 python scripts/reanalysis_boundary.py  # low memory
     RUN=topo3d_fxfine.npz REFINE=2 LINSOLVE=iterative python scripts/reanalysis_boundary.py  # big
+    RUN=topo3d_fxfine.npz REFINE=2 LEVEL_FROM=2 ... reanalysis_boundary.py  # that level, alone
 """
 
 import collections
@@ -102,6 +103,14 @@ FEMCHUNK = int(os.environ.get("FEMCHUNK", "0"))  # 0 = let jNO's own policy size
 # orders below any difference this script reports. Verified against the direct reference on the
 # fine fixed design: level 0 and level 1 agree to the digits printed either way.
 LINSOLVE = os.environ.get("LINSOLVE", "direct")  # "direct" (PARDISO) | "iterative" (BiCGStab)
+# First refinement level to SOLVE. Each level is an independent computation -- subdivide, refill,
+# solve -- so the only thing carried from one to the next is accumulated JAX state: compiled
+# programs and device buffers for every level already done. That accumulation is what puts the top
+# of a long series over the edge, and it is avoidable by running the expensive level in a fresh
+# process. LEVEL_FROM=2 REFINE=2 solves level 2 ALONE, which is the same number as it would get in
+# a 0..2 sweep -- levels do not feed each other -- but without arriving at it holding levels 0 and
+# 1. The cheap steps before the series (C_design, C_kept, C_match) always run; they are small.
+LEVEL_FROM = int(os.environ.get("LEVEL_FROM", "0"))
 LEVEL = os.environ.get("LEVEL")  # fixed iso-level instead of the volume-preserving one
 
 r = np.load(os.path.join(OUT, RUN))
@@ -465,7 +474,7 @@ print(f"  {'same geometry, EQUAL COUNT, clean tets':40s} C = {C_match:10.4f}  ({
 # earlier version of this look divergent. Midpoint subdivision is exact on planar facets, so every
 # level below solves the IDENTICAL body.
 refills = []
-for k in range(REFINE + 1):
+for k in range(LEVEL_FROM, REFINE + 1):
     Pk, Tk = subdivide(P0, T0, k)
     ak = surf_area(Pk, Tk)
     assert abs(ak - A0) < 1e-9 * max(A0, 1.0), f"subdivision moved the surface: {A0} -> {ak}"
@@ -500,7 +509,15 @@ for k, hk, n, Cr, _ in refills:
 Cs = [x[3] for x in refills]
 mono = all(Cs[i + 1] > Cs[i] for i in range(len(Cs) - 1))
 LB = max(Cs)
-if mono:
+if len(Cs) == 1:
+    # LEVEL_FROM skipped the rest of the series. One level is still a one-sided bound -- coarse P1
+    # tets are too stiff, so any level understates -- but "monotone" would be a claim about a
+    # comparison that was never made, and `all()` over an empty range says True.
+    print(f"  ONE level only (LEVEL_FROM={LEVEL_FROM}), so there is no series to check for "
+          f"monotonicity. A single level is still a lower bound: AT LEAST {LB:.4f}")
+    print(f"    the optimiser reported {C_OPT:.4f}  -> it understates the truth by at least "
+          f"{100 * (LB / C_OPT - 1):+.1f} %")
+elif mono:
     print(f"  monotone increasing, so the true compliance of this body is AT LEAST {LB:.4f}")
     print(f"    the optimiser reported {C_OPT:.4f}  -> it understates the truth by at least "
           f"{100 * (LB / C_OPT - 1):+.1f} %")

@@ -265,6 +265,59 @@ in doubt — E-FEM on the coarse deformable mesh is the only run whose reported 
 contact with its own geometry, and it gets there with a single connected component and 2.5x fewer
 dofs than the fine fixed mesh — but a matched-level comparison needs the cluster.
 
+## Validation: the paper's own 2-D cantilever
+
+Everything else here extends the method to 3-D. `scripts/cantilever2d.py` checks that the
+implementation reproduces the method it extends, which nothing did before: `runs/p2d*` is a
+pseudo-2-D SLAB run of the 3-D code with its element-volume constraint violated throughout, i.e. a
+smoke test wearing a validation's clothes.
+
+A genuine 2-D plane-stress run on triangles, their Section 3 constants, against their Fig. 5/7:
+
+| | theirs | ours | |
+|---|---|---|---|
+| elements | 4,108 | 4,226 | gmsh, same target edge |
+| dofs, E-FEM | 12,870 = 2,145 x 2 x **3** | 13,224 = 2,204 x 2 x **3** | **exact structural match** |
+| compliance, **E-FEM** | 80.809 | 80.830 at penal 3 | **+0.03 %** |
+| compliance, E-FEM (independent run) | 80.809 | 80.698 | **-0.14 %** |
+| compliance, conventional | 75.965 | window mean 86.6-92.8 | +14 % to +22 %, **oscillating** |
+| volume fraction | 0.400 | 0.3985 / 0.3933 | |
+
+**The dof count is the sharpest check and it is exact.** First-order interpolation cover carries
+1 + dim slots per node per component -- 3 in 2-D against the 4 the 3-D runs here use -- so the
+enrichment is structurally theirs, established independently of any physics. On top of that,
+E-FEM's compliance lands within 0.15 % in two independent runs.
+
+**The conventional arm does not converge, and that is the interesting half.** It swings 24-50 %
+over its last 200 iterations, so its apparent agreement depends entirely on where the run stops:
+halting at iteration 400 gives +1.8 %, the window mean gives +14 %. The E-FEM arm on identical
+mesh, optimiser and settings swings 3 %. The instability belongs to the formulation, not the
+harness -- the paper's own claim arriving as non-convergence rather than as a wrong number, which
+they do not report.
+
+**Two things this reproduction cannot match, both stated rather than smoothed over.**
+
+*The perimeter target is an assumption.* Section 3 says complexity control via the perimeter is
+"included"; Fig. 5/7 print no P*. It cannot be left off -- without a length scale the design
+fragments, the SIMP operator goes singular and the adjoint fails to factorise -- so `PSTAR=650`
+is taken from jNO's own cantilever tutorial for this domain. It is our number, not theirs.
+
+*The design stays grey where theirs is binary.* Their rule raises the exponent until M_nd < 1e-4.
+Ours plateaus: driving penalisation from 3 to 12 in staged rebuilds moves M_nd from 0.047 to 0.049
+(E-FEM) and 0.120 to 0.077 (conventional) -- a floor, not slow progress. Measured why: 9.2 % of
+cells are strictly grey (0.1 < rho < 0.9) and **87 % of those sit between a solid and a void
+neighbour**, so the grey is the one-cell interface layer the patch filter necessarily produces.
+At 4,226 cells with members a few cells wide, no exponent removes it. Either their M_nd uses a
+different convention (Sigmund's is a percentage), their filter differs, or the reported figure
+follows a post-process; the paper does not say, and this repo cannot tell from outside. The
+consequence is concrete: our compliances describe a design ~5 % grey by area, theirs a binary one,
+so read the agreements above with that caveat attached.
+
+Staged continuation is used because a differentiable exponent is closed off -- see *Other known
+blockers* -- and because it is what their Fig. 4 flowchart draws: hold the exponent literal,
+converge, raise it, rebuild, carrying the RAW density across (the physical one would be filtered
+twice and smooth the design away).
+
 ## Run it
 
 jNO comes with the repo as a **pinned submodule** (`vendor/jNO`, branch `feat/topopt-3d`), so there

@@ -22,6 +22,23 @@ cover carries 1 + dim slots per node per component: 3 in 2-D, 4 in 3-D (which is
 here use). 2,145 x 2 x 3 = 12,870 exactly. A mismatch means the enrichment is not the one the
 paper describes, and no compliance agreement would be meaningful on top of it.
 
+**THE COMPLIANCE COLUMN IS NOT DIRECTLY COMPARABLE, and that is not a detail.** Compliance scales
+as the square of the applied load, and the paper never states its load magnitude. Measured here on
+the E-FEM cantilever, changing only the declared load:
+
+    |F| = 0.9153   C = 80.667   -0.18 % against their 80.809
+    |F| = 1.0      C = 95.643  +18.4 %  against their 80.809
+
+Both are the same design at the same settings; the ratio 1.186 is the load ratio squared (1.194).
+An earlier version of this script left the coefficient at 1/SPAN, which happened to assemble
+|F| = 0.9153, and reported the resulting -0.18 % as agreement. It was not: it was an unmeasured
+free parameter landing near their (unknown) value. Absolute compliance against this paper is
+INDETERMINATE, and no number here should be quoted as matching theirs.
+
+What survives is what does not depend on the load: the dof count above, the ratio between the two
+formulations, the reanalysis gap (reported vs an independent re-solve of the same design, their
+Fig. 7c/d), and the convergence behaviour. Those are the comparisons to make.
+
 Their setup, from Section 3: target edge length 1 independent of domain size; V0max = 0.75 and
 V0min = 0.05; theta_min = 20 deg; movement variables bounded +/-2 except at boundary conditions
 and on the outer boundary; p-norm p = 50; penalisation starts at 3 and rises by one whenever the
@@ -81,18 +98,52 @@ OUT = os.environ.get("OUTDIR") or os.path.join(
 os.makedirs(OUT, exist_ok=True)
 
 SPACE = os.environ.get("SPACE", "cover")  # "cover" = E-FEM (their proposal) | "Lagrange"
-TAG = os.environ.get("TAG", f"c2d_{SPACE}")
-L, H = 60.0, 30.0  # their Fig. 5a: design domain L x 0.5L, L = 60
+PROBLEM = os.environ.get("PROBLEM", "cantilever")  # "cantilever" (Fig. 5/7) | "lbracket" (Fig. 9)
+TAG = os.environ.get("TAG", f"p2d_{PROBLEM}_{SPACE}")
 HMESH = float(os.environ.get("HMESH", "1.0"))  # "target edge length set to unity"
 E0, EMIN, NU = 1.0, 1e-9, 0.3
 LAM, MU = E0 * NU / (1 - NU**2), E0 / (2 * (1 + NU))  # PLANE STRESS -- their ABAQUS CPS4
-VOLFRAC = float(os.environ.get("VOLFRAC", "0.40"))
+
+# Their two 2-D benchmarks, each with the numbers printed in its own figure. `elements` is their
+# count and is a check on the mesh, not an input: at a unit target edge the L-bracket's area
+# 40^2 - 24^2 = 1024 gives ~2,365 triangles against their 2,320.
+_TOL = 1e-6
+PROBLEMS = {
+    # Fig. 5a: L x 0.5L, clamped on the whole left edge, point load down at the bottom-right.
+    "cantilever": dict(
+        L=60.0, H=30.0, volfrac=0.40, elements=4108, iters=143,
+        target={"cover": 80.809, "Lagrange": 75.965},
+        clamp=lambda x, y, L=60.0, H=30.0: x < _TOL * L,
+        tip=lambda x, y, L=60.0, H=30.0, s=2.0: (x > L - _TOL * L) & (y < s + _TOL * L),
+    ),
+    # Fig. 9a: the full L x L square minus its upper-right 0.6L x 0.6L block, clamped along the
+    # TOP of the vertical arm, loaded downward at the free end of the horizontal arm.
+    "lbracket": dict(
+        L=40.0, H=40.0, volfrac=0.35, elements=2320, iters=196,
+        target={"cover": 220.578, "Lagrange": None},  # they publish only the proposed method here
+        clamp=lambda x, y, L=40.0, H=40.0: y > H - _TOL * H,
+        # The free END of the horizontal arm -- an EDGE segment, exactly like the cantilever's.
+        # Written as an area patch first, it caught 8 nodes against the cantilever's 3, so the two
+        # benchmarks were carrying |F| = 4.0 against 1.5. Compliance goes as F^2, so that is a 7x
+        # distortion between problems that are supposed to differ only in geometry.
+        tip=lambda x, y, L=40.0, H=40.0, s=2.0: (x > L - _TOL * L) & (y > 0.4 * H - s),
+    ),
+}
+if PROBLEM not in PROBLEMS:
+    raise SystemExit(f"PROBLEM must be one of {sorted(PROBLEMS)}, not {PROBLEM!r}")
+P = PROBLEMS[PROBLEM]
+L, H = P["L"], P["H"]
+VOLFRAC = float(os.environ.get("VOLFRAC", str(P["volfrac"])))
 PENAL0 = float(os.environ.get("PENAL0", "3"))  # "the initial penalization factor is set to 3"
 PENAL_MAX = float(os.environ.get("PENAL_MAX", "8"))  # a cap; their rule below is what stops it
 THETA_MIN, PNORM = np.deg2rad(20.0), 50.0  # "theta_min = 20 deg", "p = 50"
 V0MAX, V0MIN = 0.75 * HMESH**2, 0.05 * HMESH**2  # "V0,max = 0.75 and V0,min = 0.05"
 MOVE_BOUND = 2.0 * HMESH  # "movement design variables are bounded between -2 and 2"
 SPAN, TOL = 2.0 * HMESH, 1e-6 * L
+# Total applied force. The paper never states it, and compliance scales as its square, so it is a
+# free multiplier on every number here -- fixed at 1.0 so the two benchmarks are at least
+# comparable to each other, and so a changed tip predicate cannot silently rescale the objective.
+LOAD = float(os.environ.get("LOAD", "1.0"))
 STAGE_ITERS = int(os.environ.get("STAGE_ITERS", "200"))  # cap per penalisation stage
 CHUNK = int(os.environ.get("CHUNK", "25"))
 CTOL = float(os.environ.get("CTOL", "1e-4"))  # "relative change in the objective ... 1e-4"
@@ -104,14 +155,61 @@ RELOCATE = int(os.environ.get("RELOCATE", "1"))  # 0 pins the mesh: the fixed-me
 # and here that is not a soft degradation -- the SIMP operator goes singular and the adjoint solve
 # fails outright. 650 is the value in jNO's own deformable-mesh cantilever tutorial for this exact
 # domain, and it is an ASSUMPTION this reproduction makes on the paper's behalf, not their number.
-PSTAR = float(os.environ.get("PSTAR", "650"))
+# The cantilever's 650 is jNO's tutorial value for that domain. The L-bracket has neither a
+# published nor an inherited one, so it is scaled by the blank's area (perimeter is a length, so
+# it scales as sqrt(area)) purely to have SOMETHING active, and is a calibration target, not a
+# measurement: see "Calibrating PSTAR" in the README for the probe-then-set procedure.
+_PSTAR_DEFAULT = {"cantilever": 650.0, "lbracket": 650.0 * (1024.0 / 1800.0) ** 0.5}[PROBLEM]
+PSTAR = float(os.environ.get("PSTAR", str(_PSTAR_DEFAULT)))
 BETA, GAMMA, BETA_MIN = 2e-4, 0.997, 1e-4
 
-_probe = jno.Shape.rect(0, 0, L, H, size=HMESH).domain()
+def geometry():
+    """The blank. The L-bracket is the square minus its upper-right block, via Shape CSG."""
+    sq = jno.Shape.rect(0, 0, L, H, size=HMESH)
+    if PROBLEM == "lbracket":
+        sq = sq - jno.Shape.rect(0.4 * L, 0.4 * H, L, H, size=HMESH)
+    return sq.domain()
+
+
+_probe = geometry()
 PTS0 = np.asarray(_probe.mesh.points)[:, :2]
 CELLS = np.asarray(_probe._cells_p1())
 NT, NN = CELLS.shape[0], PTS0.shape[0]
 del _probe
+BND_XY = None  # filled once `_boundary_xy` is defined, below
+
+
+def _boundary_xy():
+    """The blank's boundary nodes: edges of the P1 triangulation used exactly once.
+
+    Computed from connectivity rather than from plane tests, because the L-bracket's re-entrant
+    corner is not a box and hand-written planes would silently free the nodes along its two inner
+    edges -- which is the same class of mistake as the 3-D support drift: nothing fails, the
+    optimiser just quietly gets to move a boundary it was never meant to move.
+    """
+    e = np.sort(np.stack([CELLS[:, [0, 1]], CELLS[:, [1, 2]], CELLS[:, [0, 2]]], 1).reshape(-1, 2), axis=1)
+    _u, cnt = np.unique(e, axis=0, return_counts=True)
+    return PTS0[np.unique(_u[cnt == 1])]
+
+
+def _on_boundary(x, y):
+    """Exact coordinate match against the blank's boundary nodes."""
+    Q = np.stack([np.asarray(x).reshape(-1), np.asarray(y).reshape(-1)], -1)
+    out = np.zeros(Q.shape[0], dtype=bool)
+    for i in range(0, Q.shape[0], 1024):  # chunked: the pairwise block is O(chunk * n_boundary)
+        blk = Q[i : i + 1024]
+        out[i : i + 1024] = ((blk[:, None, :] - BND_XY[None, :, :]) ** 2).sum(-1).min(axis=1) < 1e-18
+    return out
+
+
+BND_XY = _boundary_xy()
+_TIPN = int(np.asarray(P["tip"](PTS0[:, 0], PTS0[:, 1])).sum())
+_CLAMPN = int(np.asarray(P["clamp"](PTS0[:, 0], PTS0[:, 1])).sum())
+if _TIPN == 0:
+    raise SystemExit(f"{PROBLEM}: the tip predicate caught no nodes -- the load would be zero")
+if _CLAMPN == 0:
+    raise SystemExit(f"{PROBLEM}: the clamp predicate caught no nodes -- the problem is unsupported")
+LOAD_COEFF = 1.0  # provisional; replaced by the probe below once a fem exists to measure
 
 
 def raw_density(crux, n):
@@ -134,8 +232,11 @@ def raw_density(crux, n):
 
 def build(penal, warm_rho=None, warm_coords=None):
     """One penalisation stage. `penal` is a LITERAL, so its derivative is never formed."""
-    d = jno.Shape.rect(0, 0, L, H, size=HMESH).domain()
-    interior = lambda x, y: (x > TOL) & (x < L - TOL) & (y > TOL) & (y < H - TOL)  # noqa: E731
+    d = geometry()
+    # Interior = not on the outer boundary, whatever that boundary is. Written as a distance to
+    # the blank's own boundary nodes rather than as plane tests, because the L-bracket's re-entrant
+    # corner is not expressible as a box and hand-written planes would silently free its edges.
+    interior = lambda x, y: ~_on_boundary(x, y)  # noqa: E731
     xm, ym, _ = d.variable("mv", where=interior, split=True)
     if RELOCATE:
         xm.trainable(name="mesh_x"), ym.trainable(name="mesh_y")
@@ -156,8 +257,8 @@ def build(penal, warm_rho=None, warm_coords=None):
     u, phi = d.fem_symbols(value_shape=(2,), **({"space": "cover"} if SPACE == "cover" else {}))
     _r, s = d.fem_symbols(space="P0", names=("r", "s"))
     xi, yi, _ = d.variable("interior", split=True)
-    xl, yl, _ = d.variable("left", split=True)  # clamped root, their Fig. 5a hatching
-    xt, yt, _ = d.variable("tip", where=lambda x, y: (x > L - TOL) & (y < SPAN + TOL), split=True)
+    xl, yl, _ = d.variable("clamp", where=P["clamp"], split=True)
+    xt, yt, _ = d.variable("tip", where=P["tip"], split=True)
 
     rho = jno.np.parameter(s, name="rho")
     rho.dtype(jnp.float64)
@@ -170,8 +271,11 @@ def build(penal, warm_rho=None, warm_coords=None):
         jno.optimizers.mma(move=0.15, lower=1e-3, upper=1.0, move_gamma=0.9985, move_min=0.0075)
     )
 
+    # Solid, non-designable material under the load. Without it the optimiser empties the loaded
+    # elements and the compliance measures that artefact rather than the structure. Built from the
+    # problem's OWN tip predicate so it follows the load wherever the problem puts it.
     cen0 = PTS0[CELLS].mean(axis=1)
-    pmask = jnp.asarray((cen0[:, 0] > L - SPAN) & (cen0[:, 1] < SPAN))  # solid under the load
+    pmask = jnp.asarray(np.asarray(P["tip"](cen0[:, 0], cen0[:, 1])).reshape(-1))
     patch = d.patch_filter()  # eq. (17)-(19)
     rho.constrain(lambda r: jnp.where(pmask, 1.0, patch(r)))
 
@@ -179,11 +283,17 @@ def build(penal, warm_rho=None, warm_coords=None):
     a = lambda p, q: LAM * trace(p) * trace(q) + 2 * MU * inner(p, q, n_contract=2)  # noqa: E731
     E = lambda r: EMIN + r**penal * (E0 - EMIN)  # noqa: E731  -- LITERAL exponent
 
+    # The load coefficient is scaled so the ASSEMBLED resultant is exactly LOAD. Counting tip
+    # nodes and dividing is wrong -- the term is a boundary integral, not a sum of nodal forces,
+    # so the node count is not its magnitude. Getting that backwards put |F| = 4.0 on the
+    # L-bracket against 1.5 on the cantilever, and then over-corrected the other way; compliance
+    # goes as F^2, so both errors rescale every number the run reports. Measure the resultant
+    # from the assembled right-hand side, exactly as `bracket.py` does in 3-D.
     fem = jno.fem(
         [
             E(rho) * a(eps(u), eps(phi)),
             u(xl, yl) - (0.0, 0.0),
-            -1.0 * inner(jnp.array([0.0, -1.0 / SPAN]), phi.bind(x=xt, y=yt), n_contract=1),
+            -1.0 * inner(jnp.array([0.0, -LOAD_COEFF]), phi.bind(x=xt, y=yt), n_contract=1),
         ],
         quad_degree=2,
     )
@@ -224,10 +334,31 @@ def build(penal, warm_rho=None, warm_coords=None):
                 compliance=compliance, volume=volume, g_ang=g_ang, g_vmx=g_vmx, perim=perim)
 
 
+# --- calibrate the load coefficient so the assembled resultant is exactly LOAD ----------------
+_probe_B = build(PENAL0)
+_A, _b = _probe_B["fem"].operator.evaluate({"rho": jnp.full(NT, VOLFRAC)})
+_f = np.asarray(jnp.asarray(_b)).reshape(-1, 2)
+_res = _f.sum(axis=0)
+_mag = float(np.linalg.norm(_res))
+if not np.isfinite(_mag) or _mag < 1e-12:
+    raise SystemExit(f"{PROBLEM}: the tip band assembled a zero load resultant ({_res}) -- a band "
+                     f"narrower than the mesh spacing contains no whole facet and integrates to "
+                     f"nothing, silently")
+LOAD_COEFF = LOAD / _mag
+print(f"  load probe: coefficient 1.0 assembles |F| = {_mag:.4f} "
+      f"(direction {np.round(_res / _mag, 3)}); scaling by {LOAD_COEFF:.4f} for |F| = {LOAD:.3f}",
+      flush=True)
+del _probe_B, _A, _b, _f
+
+_tgt = P["target"]
+_tgt_s = "  ".join(f"{k}={v}" for k, v in _tgt.items() if v is not None) or "(none published)"
 print("=" * 82, flush=True)
-print(f"  CANTILEVER 2-D  {L:.0f}x{H:.0f}  h={HMESH}  tris={NT}  nodes={NN}  SPACE={SPACE}", flush=True)
-print(f"          volfrac={VOLFRAC}  V0=[{V0MIN},{V0MAX}]  move=+/-{MOVE_BOUND}  P*={PSTAR}", flush=True)
-print(f"          paper: 4108 tris, 12870 dofs (E-FEM), C=80.809 (E-FEM) / 75.965 (conventional)", flush=True)
+print(f"  {PROBLEM.upper()} 2-D  {L:.0f}x{H:.0f}  h={HMESH}  tris={NT}  nodes={NN}  "
+      f"SPACE={SPACE}", flush=True)
+print(f"          volfrac={VOLFRAC}  V0=[{V0MIN},{V0MAX}]  move=+/-{MOVE_BOUND}  "
+      f"P*={PSTAR:.1f}{' (calibration target, not theirs)' if PROBLEM == 'lbracket' else ''}",
+      flush=True)
+print(f"          paper: {P['elements']} elements, {P['iters']} iterations, C: {_tgt_s}", flush=True)
 print("=" * 82, flush=True)
 
 # Their Fig. 4 loop: converge C at this exponent, and if the design is still grey, raise the
@@ -239,7 +370,8 @@ while penal <= PENAL_MAX:
     B = build(penal, warm_rho, warm_coords)
     crux, ev = B["crux"], (lambda n: float(np.asarray(B["crux"].eval([n])).reshape(-1)[0]))
     if not stages:
-        print(f"  dofs {B['fem'].dofs}   (their E-FEM count is 12,870)", flush=True)
+        print(f"  dofs {B['fem'].dofs}   tip nodes {_TIPN}   |F| = {LOAD:.3f}   "
+              f"clamp nodes {_CLAMPN}", flush=True)
     it, prev, stage_hist = 0, None, []
     while it < STAGE_ITERS:
         crux.solve(CHUNK, callbacks=B["callbacks"])
@@ -277,7 +409,7 @@ for spec in getattr(B["d"], "_trainable_coords", []) or []:
 area = np.abs(np.linalg.det(np.stack(
     [pts_f[CELLS][:, 1] - pts_f[CELLS][:, 0], pts_f[CELLS][:, 2] - pts_f[CELLS][:, 0]], -1))) / 2
 
-TARGET = {"cover": 80.809, "Lagrange": 75.965}[SPACE]
+TARGET = P["target"][SPACE]  # None where the paper publishes no number for that arm
 # Report a WINDOW, never the last iterate. Before staged continuation the conventional arm swung
 # 23.9 % over its last 200 iterations, so its final value was wherever the run happened to stop --
 # quoting that as "converged" turns a coin flip into an agreement (it flattered +14.0 % to +1.8 %).
@@ -287,8 +419,12 @@ print(f"\n  stages (penal, mean C, M_nd): " +
       "  ".join(f"[{p:.0f}: {c:.3f}, {m:.4f}]" for p, c, m in stages), flush=True)
 print(f"  C over the last {len(_w)} chunks: mean {_w.mean():.4f}  "
       f"range [{_w.min():.4f}, {_w.max():.4f}]  swing {_swing:.1f} %", flush=True)
-print(f"  their Fig. 7 gives {TARGET}  ->  window mean {100 * (_w.mean() / TARGET - 1):+.2f} %",
-      flush=True)
+if TARGET is None:
+    print(f"  the paper publishes no {SPACE} number for the {PROBLEM}, so there is nothing to "
+          f"compare this against -- it stands on its own", flush=True)
+else:
+    print(f"  the paper gives {TARGET}  ->  window mean {100 * (_w.mean() / TARGET - 1):+.2f} %",
+          flush=True)
 if _swing > 5.0:
     print(f"  NOT CONVERGED: a {_swing:.1f} % swing means no single value here is the answer; "
           f"the window mean summarises an oscillation, not a converged compliance", flush=True)
@@ -300,8 +436,8 @@ print(f"  volume fraction {np.sum(rho_f * area) / np.sum(area):.4f} (theirs 0.40
       f"inverted elements {int((area <= 0).sum())}", flush=True)
 if _mnd > MND_TOL:
     print(f"  STILL GREY: the exponent reached {penal:.0f} and M_nd is {_mnd:.4f}, so this design "
-          f"is NOT the binary one their {TARGET} describes -- read the comparison with that in mind",
-          flush=True)
+          f"is NOT the binary one the paper's numbers describe -- read any comparison with that "
+          f"in mind", flush=True)
 
 np.savez_compressed(
     os.path.join(OUT, f"topo2d_{TAG}.npz"),

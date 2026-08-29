@@ -49,7 +49,25 @@ EMIN = float(os.environ.get("EMIN", "1e-4"))
 LAM, MU = E0 * NU / ((1 + NU) * (1 - 2 * NU)), E0 / (2 * (1 + NU))
 VOLFRAC = float(os.environ.get("VOLFRAC", "0.25"))
 THETA_MIN, ASPECT_MAX, PN, TOL = np.deg2rad(5.0), 8.0, 50.0, 1e-9
-MOVE_BOUND = float(os.environ.get("MOVE_FRAC", "2.0")) * H_MESH
+# 0.5, not 2.0, and this is the knob that decides whether the run is FEASIBLE. Measured at
+# h=0.20, 250 iterations, CHUNK=25, everything else identical (only MOVE_FRAC varied):
+#
+#     MOVE_FRAC   compliance   g_asp        M_nd
+#         2.0        55.865    1.333  <- 33 % violated
+#         1.0        50.943    1.128  <- 13 % violated
+#         0.5        55.438    0.979  <- satisfied
+#
+# The blank is not the problem: gmsh gives it a median cell_aspect of 1.495 and a max of 3.333
+# against the bound of 8, so the constraint starts satisfied at an aggregate of 0.367 and the
+# OPTIMISER walks it into violation. Let a node travel two element lengths and it stretches tets
+# faster than a p=50 aggregate can object; halve the travel and the same design comes out feasible
+# for 0.7 % more compliance. MOVE_FRAC=1.0 reports a LOWER compliance than either, but it is 13 %
+# infeasible, so that number is bought rather than earned and is not comparable.
+#
+# CHUNK matters here too and is not bookkeeping: the earlier CHUNK=10 run at MOVE_FRAC=2.0 ended
+# at g_asp 2.043 where CHUNK=25 ends at 1.333. MMA carries moving asymptotes between steps and
+# short bursts keep restarting them -- the same effect that makes `solve(1)` oscillate in 2-D.
+MOVE_BOUND = float(os.environ.get("MOVE_FRAC", "0.5")) * H_MESH
 BAND = float(os.environ.get("BAND", "0.4"))      # thickness of each couple band, and of the end caps
 PSTAR = float(os.environ.get("PSTAR", "0"))
 BETA, GAMMA = 1e-3, 0.997

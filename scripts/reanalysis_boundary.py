@@ -47,6 +47,7 @@ enrichment on a frozen configuration.
     RUN=topo3d_h25_cover.npz LEVEL=0.5 python scripts/reanalysis_boundary.py   # fixed level instead
     RUN=topo3d_hv_cover.npz BINARY_MND=0 python scripts/reanalysis_boundary.py  # force the old path
     RUN=topo3d_fxfine.npz REFINE=2 FEMCHUNK=64 python scripts/reanalysis_boundary.py  # low memory
+    RUN=topo3d_fxfine.npz REFINE=2 LINSOLVE=iterative python scripts/reanalysis_boundary.py  # big
 """
 
 import collections
@@ -89,6 +90,18 @@ REFINE = int(os.environ.get("REFINE", "2"))  # levels of UNIFORM refinement of t
 # during assembly while levels 0 and 1 fit easily. Verified against the unchunked reference on
 # this design -- level 0 = 20.7456 and level 1 = 29.3477 either way.
 FEMCHUNK = int(os.environ.get("FEMCHUNK", "0"))  # 0 = let jNO's own policy size the batch
+# Direct vs iterative for the re-solve. PARDISO is the right default -- it is exact, and at these
+# sizes it is fast. It does not survive the top of the refinement series: at level 2 of a 16k-tet
+# body the mesh is 777,750 tets / 472,980 dofs, and a DIRECT sparse LU on 3-D elasticity fills in
+# far past what a 62 GB workstation holds, so the process dies in the factorisation (FEMCHUNK only
+# bounds ASSEMBLY, which is a different ceiling and already cleared by then).
+#
+# "iterative" hands the solve back to jNO's default: Jacobi-preconditioned matrix-free BiCGStab,
+# which never forms a factor and RAISES on non-convergence rather than returning a plausible wrong
+# number. It costs accuracy at the 1e-8 tolerance rather than machine precision, which is four
+# orders below any difference this script reports. Verified against the direct reference on the
+# fine fixed design: level 0 and level 1 agree to the digits printed either way.
+LINSOLVE = os.environ.get("LINSOLVE", "direct")  # "direct" (PARDISO) | "iterative" (BiCGStab)
 LEVEL = os.environ.get("LEVEL")  # fixed iso-level instead of the volume-preserving one
 
 r = np.load(os.path.join(OUT, RUN))
@@ -412,7 +425,9 @@ def compliance(P, C, rho_vals, tag):
         quad_degree=2,
         **({"chunk": FEMCHUNK} if FEMCHUNK > 0 else {}),
     )
-    Cc = (E(rr) * a(eps(u), eps(u))).integrate(fem, solver=pardiso_lu)
+    _integrand = E(rr) * a(eps(u), eps(u))
+    Cc = (_integrand.integrate(fem) if LINSOLVE == "iterative"
+          else _integrand.integrate(fem, solver=pardiso_lu))
     crux = jno.core([Cc], domain=jno.domain.from_array({"_": np.zeros((1, 1))}))
     return float(np.asarray(crux.eval([Cc])).reshape(-1)[0]), area
 

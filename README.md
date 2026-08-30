@@ -318,6 +318,56 @@ blockers* -- and because it is what their Fig. 4 flowchart draws: hold the expon
 converge, raise it, rebuild, carrying the RAW density across (the physical one would be filtered
 twice and smooth the design away).
 
+## The L-bracket in 3-D: the finding on a second geometry
+
+Everything above rests on one problem. `scripts/lbracket3d.py` extends the paper's own second
+benchmark (their Sec. 3.2, 2-D only) to tetrahedra: the L x L square minus its upper-right
+0.6L x 0.6L block, extruded, clamped on the top face of the vertical arm and pulled OUT OF PLANE at
+the free end of the horizontal one, so the arm twists as well as bends and the re-entrant corner
+carries a genuinely 3-D stress state. h = 0.25, 3,389 tets, volfrac 0.35, 250 iterations.
+
+Reanalysed at level 2, with the perimeter barrier active (see below for why that is not optional):
+
+| | reported | refined solve (level 2) | understates by |
+|---|---|---|---|
+| conventional (Lagrange) | 214.4373 | **≥ 34121.49** | **≥ 15812 %** |
+| **E-FEM** (`SPACE=cover`) | 328.0333 | **≥ 866.32** | **≥ 164 %** |
+
+**The formulation gap reproduces at the same magnitude as the rope bracket.** There it was ≥ 28.7 %
+against ≥ 2570 %, a 90x difference in fidelity; here ≥ 164 % against ≥ 15812 %, a 96x difference.
+Two unrelated geometries, two loads, the same ratio. The step decomposition says why: the
+conventional design's *formulation* step is exactly +0.00 % -- it is already P1, so a P1 read
+changes nothing -- while its *material model* step is **+5573 %**. Its stiffness is in the EMIN
+void, not in its solid.
+
+**E-FEM is not uniformly faithful, and this is where that shows.** ≥ 28.7 % on the rope bracket
+against ≥ 164 % here. On a harder problem it degrades badly too; it is far better than the
+conventional formulation, not close to correct. Quoting the bracket's 28.7 % as "E-FEM is accurate"
+over-reads a single problem.
+
+### Length-scale control is not optional, measured
+
+The rope bracket runs at `PSTAR=0` and produces usable designs, which made the README's blocker 2
+look like conservatism. The L-bracket shows it is not. At `PSTAR=0` the E-FEM design's load path
+narrows to **one tetrahedron** after manifold repair, and the conventional design's load and clamp
+are not face-connected at all -- the load is reached through a single VERTEX, a zero-area contact
+that transmits force perfectly in the model and cannot exist in a part. Three of the four
+unconstrained arms could not be reanalysed at all: their extracted bodies retain no whole facet on
+the load face, and `reanalysis_boundary.py` refuses by name rather than inventing a number.
+
+Setting `PSTAR = 26` (0.7x the natural perimeter AREA of 36.85, measured by a `PSTAR=0` probe) costs
+essentially nothing -- compliance 325.9 -> 328.0 for E-FEM, 217.4 -> 214.4 for conventional -- and
+makes the E-FEM design loadable. It does **not** rescue the conventional one, whose neck stays at
+one tet. The fine features the unconstrained runs bought were worth almost nothing structurally,
+which is exactly what a length scale is for.
+
+**Measure the neck, not the component count.** "The largest component holds 98 % of the solid" is
+not a manufacturability test -- a filament holds 98 % of the material in one connected piece. The
+number that matters is the narrowest cross-section on the load path, and it has two variants that
+disagree: as designed (rho > 0.5) and after the manifold repair the extraction must perform. The
+E-FEM design at `PSTAR=0` reads 3 tets as designed and **1 after repair**. Report both; the repaired
+one is the stricter and the one that decides whether a body can be built.
+
 ## Run it
 
 jNO comes with the repo as a **pinned submodule** (`vendor/jNO`, branch `feat/topopt-3d`), so there

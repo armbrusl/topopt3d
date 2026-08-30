@@ -276,5 +276,8 @@ np.savez_compressed(
     os.path.join(OUT, f"topo3d_{TAG}.npz"),
     cells=cells, pts0=pts0, pts_f=pts_f, rho_f=rho_f, solid=solid,
     hist=np.array(hist), load_f=_res, C=hist[-1][1], space=SPACE, pull=PULL,
+    # Names the problem so `reanalysis_boundary.py` takes the supports and the load from the design
+    # rather than from its own defaults -- the desync scripts/topopt/__init__.py flags as live.
+    problem="lbracket3d",
 )
 print(f"saved topo3d_{TAG}.npz  ({it} iterations, {(time.time() - t0) / 60:.1f} min)", flush=True)

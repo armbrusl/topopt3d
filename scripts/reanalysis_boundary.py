@@ -82,6 +82,43 @@ TOL = 1e-9
 PULL = np.array([0.30, -0.85, 0.43])
 PULL = PULL / np.linalg.norm(PULL)
 
+# --- which problem this design came from -------------------------------------------------------
+# The supports and the load are part of the PROBLEM, not of this script, and getting them from
+# somewhere other than the design under test is how a reanalysis ends up validating a different
+# structure than the one that was optimised. `scripts/topopt/__init__.py` names this exact desync
+# as a live bug: the reanalysis hardcoded the rope bracket's `PULL` while `bracket.py` read it
+# from the environment, so changing the load made this script silently check something else.
+#
+# The design npz now carries its problem name, so the selection follows the file rather than the
+# reader's memory. PROBLEM= overrides it, for a design written before the name was recorded.
+_LB_L, _LB_ARM, _LB_H = 4.0, 1.6, 0.25
+
+
+def _band(v, lo, hi):
+    return (v > lo) & (v < hi)
+
+
+PROBLEMS = {
+    # The rope bracket: clamped on two bolt-hole walls, pulled on a patch of the flat top.
+    "bracket": dict(
+        clamp=lambda x, y, z: (jnp.hypot(x - BX1, y - BY) < RB + 0.10)
+        | (jnp.hypot(x - BX2, y - BY) < RB + 0.10),
+        load=lambda x, y, z: (y > LY - TOL) & (x > TOPL - TOL) & (x < TOPR + TOL),
+        load_np=lambda X, Y, Z: (Y > LY - 1e-6) & (X > TOPL - 1e-6) & (X < TOPR + 1e-6),
+        pull=PULL,
+        what="rope patch",
+    ),
+    # The 3-D L-bracket: clamped on the top face of the vertical arm, loaded on the free end face
+    # of the horizontal arm. Must match `scripts/lbracket3d.py` exactly.
+    "lbracket3d": dict(
+        clamp=lambda x, y, z: y > _LB_L - 1e-7 * _LB_L,
+        load=lambda x, y, z: (x > _LB_L - 1e-7 * _LB_L) & (y < _LB_ARM + 1e-7 * _LB_L),
+        load_np=lambda X, Y, Z: (X > _LB_L - 1e-6) & (Y < _LB_ARM + 1e-6),
+        pull=np.array([0.0, -1.0, 0.45]) / np.linalg.norm([0.0, -1.0, 0.45]),
+        what="end face",
+    ),
+}
+
 RUN = os.environ.get("RUN", "topo3d_h25_cover.npz")
 TAG = RUN.replace("topo3d_", "").replace(".npz", "")
 REFINE = int(os.environ.get("REFINE", "2"))  # levels of UNIFORM refinement of the extracted solid
@@ -115,6 +152,16 @@ LEVEL = os.environ.get("LEVEL")  # fixed iso-level instead of the volume-preserv
 
 r = np.load(os.path.join(OUT, RUN))
 cells, pts, rho = r["cells"], r["pts_f"].astype(float), r["rho_f"].astype(float)
+# The design file names its own problem. Falling back to "bracket" keeps every npz written before
+# the name was recorded working, but an explicit name in the file always wins over that default --
+# a reanalysis that guesses its supports is checking a structure nobody optimised.
+_pname = os.environ.get("PROBLEM") or (str(r["problem"]) if "problem" in r.files else "bracket")
+if _pname not in PROBLEMS:
+    raise SystemExit(f"unknown problem {_pname!r}; known: {sorted(PROBLEMS)}")
+PROB = PROBLEMS[_pname]
+print(f"problem: {_pname}  (supports and load taken from "
+      f"{'the design file' if 'problem' in r.files and not os.environ.get('PROBLEM') else 'PROBLEM=' if os.environ.get('PROBLEM') else 'the pre-naming default'})",
+      flush=True)
 LF = ((0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3))
 
 
@@ -397,16 +444,8 @@ def compliance(P, C, rho_vals, tag):
     rr.initialize(lambda k, sh, dtype=None, _v=vals: _v.reshape(sh))
 
     xi, yi, zi, _ = d.variable("interior", split=True)
-    bolts = d.variable(
-        "boltwalls",
-        where=lambda x, y, z: (jnp.hypot(x - BX1, y - BY) < RB + 0.10) | (jnp.hypot(x - BX2, y - BY) < RB + 0.10),
-        split=True,
-    )[:3]
-    eye = d.variable(
-        "ropepatch",
-        where=lambda x, y, z: (y > LY - TOL) & (x > TOPL - TOL) & (x < TOPR + TOL),
-        split=True,
-    )[:3]
+    bolts = d.variable("clamped", where=PROB["clamp"], split=True)[:3]
+    eye = d.variable("loaded", where=PROB["load"], split=True)[:3]
     eps = lambda w: symgrad(w, [xi, yi, zi])  # noqa: E731
     a = lambda p, q: LAM * trace(p) * trace(q) + 2 * MU * inner(p, q, n_contract=2)  # noqa: E731
     E = lambda x: EMIN + x**PENAL * (E0 - EMIN)  # noqa: E731
@@ -420,16 +459,17 @@ def compliance(P, C, rho_vals, tag):
             k = tuple(sorted(int(c[i]) for i in f))
             seen.pop(k, None) if k in seen else seen.setdefault(k, t)
     tri = np.array(list(seen.keys()), dtype=int)
-    keep = ((p0[tri][..., 1] > LY - 1e-6) & (p0[tri][..., 0] > TOPL - 1e-6) & (p0[tri][..., 0] < TOPR + 1e-6)).all(axis=1)
+    _V = p0[tri]
+    keep = PROB["load_np"](_V[..., 0], _V[..., 1], _V[..., 2]).all(axis=1)
     v = p0[tri[keep]]
     area = float(np.linalg.norm(np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0]), axis=1).sum() / 2.0)
-    assert area > 1e-12, f"{tag}: the rope patch has no facets on this mesh"
+    assert area > 1e-12, f"{tag}: the {PROB['what']} has no facets on this mesh"
 
     fem = jno.fem(
         [
             E(rr) * a(eps(u), eps(phi)),
             u(*bolts) - (0.0, 0.0, 0.0),
-            -1.0 * inner(jnp.asarray(PULL / area), phi.bind(**dict(zip("xyz", eye))), 1),
+            -1.0 * inner(jnp.asarray(PROB["pull"] / area), phi.bind(**dict(zip("xyz", eye))), 1),
         ],
         quad_degree=2,
         **({"chunk": FEMCHUNK} if FEMCHUNK > 0 else {}),

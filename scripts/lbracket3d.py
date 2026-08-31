@@ -240,44 +240,86 @@ print(f"        volfrac={VOLFRAC}  SPACE={SPACE}  RELOCATE={RELOCATE}  pull={np.
       f"PSTAR={PSTAR}  BETA_H={BETA_H}  ITERS={ITERS}  TAG={TAG}", flush=True)
 print("=" * 92, flush=True)
 
-t0, it, hist = time.time(), 0, []
+DST = os.path.join(OUT, f"topo3d_{TAG}.npz")
 # Mandatory. Catches a boundary node drifting INTO a BC zone, which changes the support set with
 # no exception and no visibly wrong number -- only an independent re-solve disagrees.
 guard = CO.DriftGuard(pts0, cells, _ZONES) if RELOCATE else None
+
+
+def coords_now():
+    """The mesh as it stands. Rebuilt per checkpoint, not cached -- the nodes are design vars."""
+    p = pts0.copy()
+    for spec in getattr(d, "_trainable_coords", []) or []:
+        p[np.asarray(spec["ids"], dtype=int), int(spec["axis"])] = np.asarray(
+            crux.eval([spec["expr"]])
+        ).reshape(-1)
+    return p
+
+
+def checkpoint(rho_f, pts_f, drift, hist, extra):
+    """Write the design atomically, every chunk.
+
+    Every chunk, not once at the end, for two reasons measured the hard way. A queue kill or an
+    OOM used to lose the whole run -- this script wrote its npz exactly once, after the loop, so a
+    23-hour job that died at hour 22 left nothing. And the BC-drift check used to `SystemExit`
+    BEFORE the save, so the one failure mode most worth inspecting destroyed its own evidence.
+    Now the design is on disk first and stamped `bc_drift`, and the caller decides whether to stop.
+
+    `tmp` + `os.replace` because a kill DURING the write would otherwise corrupt the previous
+    good checkpoint too -- `os.replace` is atomic within a filesystem, so the file on disk is
+    always one complete checkpoint or the other, never a half of one.
+    """
+    H = np.array(hist)
+    tmp = DST + ".tmp.npz"
+    np.savez_compressed(
+        tmp,
+        cells=cells, pts0=pts0, pts_f=pts_f, rho_f=rho_f, solid=solid,
+        hist=H,                       # kept: the lb3p_* npz already on disk are read with this
+        # Canonical per-iteration columns, the layout `cluster_report.py` and `export_console.py`
+        # expect from `bracket.py`. Same numbers, addressable by name.
+        it=H[:, 0], C=H[:, 1], V=H[:, 2], mnd=H[:, 3],
+        P=np.asarray(extra["P"]), ang=np.asarray(extra["ang"]),
+        asp=np.asarray(extra["asp"]), vmx=np.asarray(extra["vmx"]),
+        load_f=_res, space=SPACE, pull=PULL,
+        # Names the problem so `reanalysis_boundary.py` takes the supports and the load from the
+        # design rather than its own defaults -- the desync topopt/__init__.py flags as live.
+        problem="lbracket3d",
+        bc_drift=np.asarray(drift, dtype=int),
+    )
+    os.replace(tmp, DST)
+
+
+t0, it, hist = time.time(), 0, []
+extra = {k: [] for k in ("P", "ang", "asp", "vmx")}
 while time.time() - t0 < BUDGET and it < ITERS:
     crux.solve(CHUNK, callbacks=callbacks)
     it += CHUNK
     rf = np.asarray(crux.eval([rho_phys])).reshape(-1)
     hist.append((it, ev(compliance), ev(volume), float(np.mean(4 * rf * (1 - rf)))))
+    # Evaluated for the print line anyway; recording them costs nothing and is what lets the
+    # report and the console read an L-bracket run at all.
+    for k, node in (("P", perim), ("ang", G["g_ang"]), ("asp", G["g_asp"]), ("vmx", G["g_vmx"])):
+        extra[k].append(ev(node))
     print(f"  it {it:4d}  C={hist[-1][1]:10.4f}  V={hist[-1][2]:.4f}  M_nd={hist[-1][3]:.4f}  "
-          f"P={ev(perim):8.2f}  g_ang={ev(G['g_ang']):.3f} asp={ev(G['g_asp']):.3f} "
-          f"vmx={ev(G['g_vmx']):.3f}  ({time.time() - t0:.0f}s)", flush=True)
+          f"P={extra['P'][-1]:8.2f}  g_ang={extra['ang'][-1]:.3f} asp={extra['asp'][-1]:.3f} "
+          f"vmx={extra['vmx'][-1]:.3f}  ({time.time() - t0:.0f}s)", flush=True)
 
-pts_f = pts0.copy()
-for spec in getattr(d, "_trainable_coords", []) or []:
-    pts_f[np.asarray(spec["ids"], dtype=int), int(spec["axis"])] = np.asarray(
-        crux.eval([spec["expr"]])
-    ).reshape(-1)
-if guard is not None:
-    _n0, _n1, _nch = guard.check(pts_f)
-    print(f"BC drift: {_n0} boundary nodes in the BC zones at setup, {_n1} at convergence, "
-          f"{_nch} changed", flush=True)
-    if _nch:
-        # Loud, because the failure is otherwise invisible: the solve stays well posed and only an
-        # independent re-solve of the saved mesh disagrees. This is the 13.9 % retraction's cause.
+    pts_f = coords_now()
+    drift = guard.check(pts_f) if guard is not None else (0, 0, 0)
+    checkpoint(rf, pts_f, drift, hist, extra)
+    if drift[2]:
+        # Checked every chunk, not once at the end: this finds the fault ~10 chunks earlier, and
+        # the design that was still valid up to this chunk survives on disk with the flag on it.
+        print(f"BC drift at it {it}: {drift[0]} nodes in the BC zones at setup, {drift[1]} now, "
+              f"{drift[2]} changed", flush=True)
         raise SystemExit(
-            f"{_nch} boundary node(s) entered or left a BC zone during the run, so the supports "
-            f"no longer describe the geometry their predicate names -- the reported compliance is "
-            f"not trustworthy. Widen the freeze margin (currently {float(np.sqrt(3.0)) * MOVE_BOUND:.4f})."
+            f"{drift[2]} boundary node(s) entered or left a BC zone during the run, so the "
+            f"supports no longer describe the geometry their predicate names -- the reported "
+            f"compliance is not trustworthy. The checkpoint IS saved and stamped bc_drift, so the "
+            f"design can be inspected. Widen the freeze margin (currently "
+            f"{float(np.sqrt(3.0)) * MOVE_BOUND:.4f})."
         )
 
-rho_f = np.asarray(crux.eval([rho_phys])).reshape(-1)
-np.savez_compressed(
-    os.path.join(OUT, f"topo3d_{TAG}.npz"),
-    cells=cells, pts0=pts0, pts_f=pts_f, rho_f=rho_f, solid=solid,
-    hist=np.array(hist), load_f=_res, C=hist[-1][1], space=SPACE, pull=PULL,
-    # Names the problem so `reanalysis_boundary.py` takes the supports and the load from the design
-    # rather than from its own defaults -- the desync scripts/topopt/__init__.py flags as live.
-    problem="lbracket3d",
-)
+print(f"BC drift: {drift[0]} boundary nodes in the BC zones at setup, {drift[1]} at convergence, "
+      f"{drift[2]} changed", flush=True)
 print(f"saved topo3d_{TAG}.npz  ({it} iterations, {(time.time() - t0) / 60:.1f} min)", flush=True)

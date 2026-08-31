@@ -115,6 +115,7 @@ PROBLEMS = {
         target={"cover": 80.809, "Lagrange": 75.965},
         clamp=lambda x, y, L=60.0, H=30.0: x < _TOL * L,
         tip=lambda x, y, L=60.0, H=30.0, s=2.0: (x > L - _TOL * L) & (y < s + _TOL * L),
+        passive=lambda x, y, L=60.0, H=30.0, s=2.0: (x > L - s) & (y < s),
     ),
     # Fig. 9a: the full L x L square minus its upper-right 0.6L x 0.6L block, clamped along the
     # TOP of the vertical arm, loaded downward at the free end of the horizontal arm.
@@ -127,6 +128,7 @@ PROBLEMS = {
         # benchmarks were carrying |F| = 4.0 against 1.5. Compliance goes as F^2, so that is a 7x
         # distortion between problems that are supposed to differ only in geometry.
         tip=lambda x, y, L=40.0, H=40.0, s=2.0: (x > L - _TOL * L) & (y > 0.4 * H - s),
+        passive=lambda x, y, L=40.0, H=40.0, s=2.0: (x > L - s) & (y > 0.4 * H - s),
     ),
 }
 if PROBLEM not in PROBLEMS:
@@ -207,6 +209,14 @@ _TIPN = int(np.asarray(P["tip"](PTS0[:, 0], PTS0[:, 1])).sum())
 _CLAMPN = int(np.asarray(P["clamp"](PTS0[:, 0], PTS0[:, 1])).sum())
 if _TIPN == 0:
     raise SystemExit(f"{PROBLEM}: the tip predicate caught no nodes -- the load would be zero")
+_CEN0 = PTS0[CELLS].mean(axis=1)
+_PASSN = int(np.asarray(P["passive"](_CEN0[:, 0], _CEN0[:, 1])).sum())
+if _PASSN == 0:
+    raise SystemExit(
+        f"{PROBLEM}: the passive predicate caught no CELLS, so there is no solid material under "
+        f"the load and the optimiser is free to empty the loaded elements -- the compliance would "
+        f"measure that artefact. (A predicate written as a boundary edge does this: no centroid "
+        f"lies on an edge. The passive region has to be an AREA.)")
 if _CLAMPN == 0:
     raise SystemExit(f"{PROBLEM}: the clamp predicate caught no nodes -- the problem is unsupported")
 LOAD_COEFF = 1.0  # provisional; replaced by the probe below once a fem exists to measure
@@ -272,10 +282,14 @@ def build(penal, warm_rho=None, warm_coords=None):
     )
 
     # Solid, non-designable material under the load. Without it the optimiser empties the loaded
-    # elements and the compliance measures that artefact rather than the structure. Built from the
-    # problem's OWN tip predicate so it follows the load wherever the problem puts it.
+    # elements and the compliance measures that artefact rather than the structure.
+    #
+    # It needs its OWN predicate, an AREA, and reusing the tip one is a bug I shipped: the tip is a
+    # boundary EDGE (that is what makes the load an integral of the right magnitude), and no cell
+    # centroid ever satisfies an edge test, so `pmask` was all-False on both benchmarks and there
+    # was no passive region at all. It is checked below rather than trusted.
     cen0 = PTS0[CELLS].mean(axis=1)
-    pmask = jnp.asarray(np.asarray(P["tip"](cen0[:, 0], cen0[:, 1])).reshape(-1))
+    pmask = jnp.asarray(np.asarray(P["passive"](cen0[:, 0], cen0[:, 1])).reshape(-1))
     patch = d.patch_filter()  # eq. (17)-(19)
     rho.constrain(lambda r: jnp.where(pmask, 1.0, patch(r)))
 
@@ -371,7 +385,7 @@ while penal <= PENAL_MAX:
     crux, ev = B["crux"], (lambda n: float(np.asarray(B["crux"].eval([n])).reshape(-1)[0]))
     if not stages:
         print(f"  dofs {B['fem'].dofs}   tip nodes {_TIPN}   |F| = {LOAD:.3f}   "
-              f"clamp nodes {_CLAMPN}", flush=True)
+              f"clamp nodes {_CLAMPN}   passive cells {_PASSN}", flush=True)
     it, prev, stage_hist = 0, None, []
     while it < STAGE_ITERS:
         crux.solve(CHUNK, callbacks=B["callbacks"])

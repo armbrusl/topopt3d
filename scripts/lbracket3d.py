@@ -92,6 +92,28 @@ cells = np.asarray(d._cells_p1())
 NT, NN = cells.shape[0], pts0.shape[0]
 TOL = 1e-7 * L
 
+# WARMSTART=<npz> continues a previous run: its density seeds `rho` and its converged mesh becomes
+# this run's starting geometry. The point here is resilience, not tuning -- with per-chunk
+# checkpointing a killed run leaves a complete design, and this is what lets the next attempt pick
+# it up instead of starting from the blank. Mirrors `bracket.py`'s mechanism, including its two
+# asserts: a warm start onto a DIFFERENT mesh silently reinterprets one cell's density as another
+# cell's, which no downstream check would catch.
+_WARM = os.environ.get("WARMSTART", "")
+_warm = None
+if _WARM:
+    _warm = np.load(os.path.join(OUT, _WARM))
+    assert _warm["cells"].shape == cells.shape, (
+        f"{_WARM} has {_warm['cells'].shape[0]} cells, this blank has {cells.shape[0]} -- a warm "
+        f"start only means anything on the identical mesh")
+    assert np.array_equal(np.asarray(_warm["cells"]), cells), (
+        f"{_WARM} has the same number of cells but a different connectivity -- its densities do "
+        f"not correspond to this blank's elements")
+    d.mesh.points[:, :3] = _warm["pts_f"]
+    pts0 = np.asarray(d.mesh.points)
+    _wC = np.asarray(_warm["C"]).reshape(-1)
+    print(f"warm start: {_WARM}  (C={float(_wC[-1]):.4f}, "
+          f"M_nd={float(4 * (_warm['rho_f'] * (1 - _warm['rho_f'])).mean()):.4f})", flush=True)
+
 # --- boundary conditions ------------------------------------------------------------------------
 # Clamp: the TOP face of the vertical arm (their Fig. 9a hatching).
 # Load:  the free END face of the horizontal arm, the opposite corner of the L.
@@ -134,7 +156,11 @@ u, phi = d.fem_symbols(value_shape=(3,), **({"space": "cover"} if SPACE == "cove
 _r, s = d.fem_symbols(space="P0", names=("r", "s"))
 rho = jno.np.parameter(s, name="rho")
 rho.dtype(jnp.float64)
-rho.initialize(jax.nn.initializers.constant(VOLFRAC))
+if _warm is not None:
+    _rho0 = jnp.asarray(np.asarray(_warm["rho_f"], dtype=float))
+    rho.initialize(lambda k, sh, dtype=None, _v=_rho0: _v.reshape(sh))
+else:
+    rho.initialize(jax.nn.initializers.constant(VOLFRAC))
 rho.optimizer(jno.optimizers.mma(move=0.15, lower=1e-3, upper=1.0, move_gamma=0.9985, move_min=0.0075))
 
 # Solid, non-designable material under the load and at the clamp: without it the optimiser empties

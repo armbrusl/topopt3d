@@ -52,8 +52,11 @@ enrichment on a frozen configuration.
 """
 
 import collections
+import json
 import os
+import resource
 import sys
+import time
 
 import jax
 
@@ -146,8 +149,16 @@ LINSOLVE = os.environ.get("LINSOLVE", "direct")  # "direct" (PARDISO) | "iterati
 # of a long series over the edge, and it is avoidable by running the expensive level in a fresh
 # process. LEVEL_FROM=2 REFINE=2 solves level 2 ALONE, which is the same number as it would get in
 # a 0..2 sweep -- levels do not feed each other -- but without arriving at it holding levels 0 and
-# 1. The cheap steps before the series (C_design, C_kept, C_match) always run; they are small.
+# 1. The control steps before the series (C_design, C_kept, C_match) run unless CONTROLS=0.
 LEVEL_FROM = int(os.environ.get("LEVEL_FROM", "0"))
+# The three control solves before the series -- C_design (the SIMP field on the design mesh),
+# C_kept (the extracted solid on those same tets) and C_match (an equal-count clean refill) -- are
+# what separate formulation from material model from distortion. They do not depend on the
+# refinement level, so a run that solves ONE deep level alone re-does them for nothing: at the
+# fine fixed design that is a 53k-tet solve plus a 20-step gmsh bisection per level. CONTROLS=0
+# skips them. Default 1, so every existing invocation is unchanged -- and the redundancy is also a
+# free repeatability check, which is why this is opt-out rather than opt-in.
+CONTROLS = int(os.environ.get("CONTROLS", "1"))
 LEVEL = os.environ.get("LEVEL")  # fixed iso-level instead of the volume-preserving one
 
 r = np.load(os.path.join(OUT, RUN))
@@ -484,30 +495,40 @@ def compliance(P, C, rho_vals, tag):
 C_OPT = float(np.asarray(r["C"]).reshape(-1)[-1]) if "C" in r.files else float("nan")
 
 print()
-C_design, a_d = compliance(pts, cells, rho, "design")
-print(f"  {'design, SIMP field, design mesh':40s} C = {C_design:10.4f}  ({len(cells):6d} tets, patch {a_d:.5f})")
-C_kept, a_k = compliance(pts, kept, np.ones(len(kept)), "kept")
-print(f"  {'extracted solid, the SAME tets':40s} C = {C_kept:10.4f}  ({len(kept):6d} tets, patch {a_k:.5f})")
+if CONTROLS:
+    C_design, a_d = compliance(pts, cells, rho, "design")
+    print(f"  {'design, SIMP field, design mesh':40s} C = {C_design:10.4f}  ({len(cells):6d} tets, patch {a_d:.5f})")
+    C_kept, a_k = compliance(pts, kept, np.ones(len(kept)), "kept")
+    print(f"  {'extracted solid, the SAME tets':40s} C = {C_kept:10.4f}  ({len(kept):6d} tets, patch {a_k:.5f})")
 
-# The equal-count fill. It must use the RAW surface, not the subdivided one: 5,648 boundary
-# triangles put a floor on the tet count far above what the design spent, so a matched fill is
-# only reachable on the original 1,412. That is the stricter control anyway -- identical geometry
-# AND identical surface triangulation, leaving element quality as the only difference.
-n_want, lo_h, hi_h, best = len(kept), 0.01, 2.0, None
-for _ in range(20):
-    mh = 0.5 * (lo_h + hi_h)
-    P, Cx = refill(pts[used], remap[btri], mh)
-    if best is None or abs(len(Cx) - n_want) < abs(len(best[1]) - n_want):
-        best = (P, Cx, mh)
-    if len(Cx) > n_want:
-        lo_h = mh
-    else:
-        hi_h = mh
-    if abs(len(Cx) - n_want) <= max(8, n_want // 100):
-        break
-P_m, C_m, h_m = best
-C_match, a_m = compliance(P_m, C_m, np.ones(len(C_m)), "match")
-print(f"  {'same geometry, EQUAL COUNT, clean tets':40s} C = {C_match:10.4f}  ({len(C_m):6d} tets, patch {a_m:.5f}, h={h_m:.4f})")
+    # The equal-count fill. It must use the RAW surface, not the subdivided one: 5,648 boundary
+    # triangles put a floor on the tet count far above what the design spent, so a matched fill is
+    # only reachable on the original 1,412. That is the stricter control anyway -- identical
+    # geometry AND identical surface triangulation, leaving element quality as the only difference.
+    n_want, lo_h, hi_h, best = len(kept), 0.01, 2.0, None
+    for _ in range(20):
+        mh = 0.5 * (lo_h + hi_h)
+        P, Cx = refill(pts[used], remap[btri], mh)
+        if best is None or abs(len(Cx) - n_want) < abs(len(best[1]) - n_want):
+            best = (P, Cx, mh)
+        if len(Cx) > n_want:
+            lo_h = mh
+        else:
+            hi_h = mh
+        if abs(len(Cx) - n_want) <= max(8, n_want // 100):
+            break
+    P_m, C_m, h_m = best
+    C_match, a_m = compliance(P_m, C_m, np.ones(len(C_m)), "match")
+    print(f"  {'same geometry, EQUAL COUNT, clean tets':40s} C = {C_match:10.4f}  ({len(C_m):6d} tets, patch {a_m:.5f}, h={h_m:.4f})")
+else:
+    # Skipped, and recorded as skipped rather than as zero: the per-level JSON carries these, and
+    # a 0.0 there would be read as a measurement. A shallower run of the same design already has
+    # them; this path exists for solving ONE deep level in a fresh process.
+    C_design = C_kept = C_match = None
+    print("  CONTROLS=0: the design / extracted / equal-count control solves are SKIPPED.",
+          flush=True)
+    print("             They do not depend on the refinement level, so a shallower run of this "
+          "design already measured them.", flush=True)
 
 # UNIFORM refinement. The surface must halve with the interior: leaving it fixed pins the element
 # size near the boundary, and the series then measures the interior alone -- which is what made an
@@ -520,29 +541,59 @@ for k in range(LEVEL_FROM, REFINE + 1):
     assert abs(ak - A0) < 1e-9 * max(A0, 1.0), f"subdivision moved the surface: {A0} -> {ak}"
     hk = H0 / 2**k
     P, Cx = refill(Pk, Tk, hk)
+    _t_level = time.time()
     Cr, a_r = compliance(P, Cx, np.ones(len(Cx)), f"lvl{k}")
     refills.append((k, hk, len(Cx), Cr, a_r))
+    # One JSON per (tag, level), written the instant the solve returns. Until now the only record
+    # of a level was stdout, so a kill mid-write truncated the log `cluster_report.py` scrapes --
+    # and at the top of a series that is a multi-hour solve whose result then reads as absent
+    # rather than as done. Written per level, not per run, because that is the unit of work that
+    # can die. `tau` and `kept_tets` ride along in EVERY level's file so the report can assert
+    # they agree across levels of one tag: they must, the extraction being deterministic, and if
+    # they do not then the design npz changed underneath the series, which has no other symptom.
+    _json_path = os.path.join(OUT, f"reb_{TAG}_L{k}.json")
+    with open(_json_path, "w", encoding="utf-8") as _fh:
+        json.dump({
+            "tag": TAG, "problem": _pname, "level": k, "h": hk,
+            "tets": int(len(Cx)), "points": int(len(P)), "dofs": 3 * int(len(P)),
+            "C": Cr, "patch_area": a_r,
+            "linsolve": LINSOLVE, "femchunk": FEMCHUNK, "controls": CONTROLS,
+            "tau": TAU, "tau_why": WHY, "kept_tets": int(mask.sum()),
+            "material_target": M_TARGET, "material_kept": float(V[mask].sum()),
+            "surface_triangles": int(len(btri)),
+            "interior_node_pct": 100.0 * (_nn - _ns) / _nn,
+            "C_opt": C_OPT, "C_design": C_design, "C_kept": C_kept, "C_match": C_match,
+            "seconds": time.time() - _t_level,
+            "peak_rss_gb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6,
+        }, _fh, indent=2)
     print(f"  {'uniform refinement level ' + str(k) + f' (h={hk:.4f})':40s} C = {Cr:10.4f}  "
           f"({len(Cx):6d} tets, {len(Tk):6d} facets, patch {a_r:.5f})")
 
 print()
-print(f"formulation   C_opt {C_OPT:.4f} -> P1 read {C_design:.4f}       : {100 * (C_design / C_OPT - 1):+7.2f} %")
-print(f"material model  SIMP field -> extracted solid, same mesh: {100 * (C_kept / C_design - 1):+7.2f} %")
-print()
 _frac = 100 * (_nn - _ns) / _nn
-print(f"DISTORTION      same geometry, {len(C_m)} vs {len(kept)} tets   : {100 * (C_match / C_kept - 1):+7.2f} %")
-print("                (equal resolution, so this is element QUALITY alone)")
-print(f"                the extracted solid is {_frac:.1f} % interior nodes, and a refill can only")
-if _frac < 10.0:
-    print("                move those -- with the surface pinned this tightly there is barely an")
-    print("                alternative tetrahedralisation to find, so read this as 'distortion has no")
-    print("                room to operate at this resolution', NOT as 'distortion is harmless'.")
+if CONTROLS:
+    print(f"formulation   C_opt {C_OPT:.4f} -> P1 read {C_design:.4f}       : {100 * (C_design / C_OPT - 1):+7.2f} %")
+    print(f"material model  SIMP field -> extracted solid, same mesh: {100 * (C_kept / C_design - 1):+7.2f} %")
+    print()
+    print(f"DISTORTION      same geometry, {len(C_m)} vs {len(kept)} tets   : {100 * (C_match / C_kept - 1):+7.2f} %")
+    print("                (equal resolution, so this is element QUALITY alone)")
+    print(f"                the extracted solid is {_frac:.1f} % interior nodes, and a refill can only")
+    if _frac < 10.0:
+        print("                move those -- with the surface pinned this tightly there is barely an")
+        print("                alternative tetrahedralisation to find, so read this as 'distortion has no")
+        print("                room to operate at this resolution', NOT as 'distortion is harmless'.")
+    else:
+        print("                move those, which bounds what this control is able to detect.")
 else:
-    print("                move those, which bounds what this control is able to detect.")
+    print("formulation / material model / distortion: not measured in this run (CONTROLS=0).")
+    print(f"                the extracted solid is {_frac:.1f} % interior nodes")
 print()
 print("uniform refinement of the IDENTICAL body:")
 for k, hk, n, Cr, _ in refills:
-    print(f"  level {k} (h={hk:.4f}, {n:7d} tets): C = {Cr:8.4f}   {100 * (Cr / C_kept - 1):+7.2f} % vs the design's own tets")
+    # Against C_kept when it was measured. Without it there is no same-mesh reference to compare
+    # to, and printing the level's raw C is the honest thing rather than inventing a denominator.
+    _rel = f"   {100 * (Cr / C_kept - 1):+7.2f} % vs the design's own tets" if CONTROLS else ""
+    print(f"  level {k} (h={hk:.4f}, {n:7d} tets): C = {Cr:8.4f}{_rel}")
 
 # P1 tets are stiff and refinement can only soften them, so a monotone series is a one-sided bound
 # on the truth -- which is all that is needed, and is honest where an extrapolation would not be.

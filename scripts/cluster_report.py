@@ -15,6 +15,7 @@ Pure numpy -- no jax, no jNO, no pixi environment. It must run anywhere the file
 """
 
 import json
+import glob
 import os
 import re
 import sys
@@ -35,6 +36,31 @@ def _grab(txt, pat, cast=float, default=None):
     return cast(m.group(1)) if m else default
 
 
+def _cols(r):
+    """Per-iteration history from EITHER npz layout, as {name: 1-D array or None}.
+
+    `bracket.py` and friends write named columns (`it`, `C`, `V`, `mnd`, `P`, `S`, `asp`, ...).
+    `lbracket3d.py` designs written before its checkpointing landed carry only a single `hist`
+    (N, 4) block of (it, C, V, mnd) and a SCALAR `C`. Reading the first layout's names off the
+    second raised `KeyError`, so this report could not open an L-bracket run at all.
+
+    Missing series come back as None rather than zeros -- the printer already renders None as
+    "-", and a zero here would read as a measurement.
+    """
+    names = ("it", "C", "V", "mnd", "P", "S", "ang", "asp", "vmx", "vmn")
+    have = {n: np.asarray(r[n]).reshape(-1) for n in names if n in r.files}
+    # A scalar `C` beside a `hist` block is the old lbracket layout: `hist` is authoritative.
+    if "hist" in r.files and have.get("it") is None and have.get("C", np.zeros(1)).size <= 1:
+        h = np.asarray(r["hist"])
+        if h.ndim == 2 and h.shape[1] >= 4:
+            have.update(dict(zip(("it", "C", "V", "mnd"), [c.reshape(-1) for c in h.T[:4]])))
+    return {n: have.get(n) for n in names}
+
+
+def _last(a):
+    return None if a is None or len(a) == 0 else float(a[-1])
+
+
 def design(tag):
     """Everything the saved design can tell us, plus the checks that fail quietly."""
     p = os.path.join(OUT, f"topo3d_{tag}.npz")
@@ -44,26 +70,40 @@ def design(tag):
     cells, p0, pf, rho = r["cells"], r["pts0"], r["pts_f"], r["rho_f"]
     v0, vf = _vols(cells, p0), _vols(cells, pf)
     d = np.linalg.norm(pf - p0, axis=1)
-    it = [int(x) for x in np.asarray(r["it"]).reshape(-1)]
+    c = _cols(r)
+    it = [int(x) for x in c["it"]] if c["it"] is not None else []
+    Ch = [float(x) for x in c["C"]] if c["C"] is not None else []
+    # How much the reported compliance depends on WHERE the run stopped. The 2-D conventional arm
+    # swings 24-50 % over its last 200 iterations, so its agreement with the paper is an artefact
+    # of the stopping iteration; the 3-D arms measure 1-4 %. Any ratio quoted from `C` inherits
+    # this as its error bar, so the report computes it rather than leaving it to be forgotten.
+    _w = np.asarray(Ch[-8:]) if len(Ch) >= 2 else None
     out = {
         "tag": tag,
         "status": "ok",
+        "problem": str(r["problem"]) if "problem" in r.files else "bracket",
         "tets": int(cells.shape[0]),
         "nodes": int(p0.shape[0]),
         "iterations": it[-1] if it else 0,
         "frames": len(it),
-        "C": float(np.asarray(r["C"]).reshape(-1)[-1]),
-        "C_history": [float(x) for x in np.asarray(r["C"]).reshape(-1)],
-        "V": float(np.asarray(r["V"]).reshape(-1)[-1]),
-        "M_nd": float(np.asarray(r["mnd"]).reshape(-1)[-1]),
-        "perimeter": float(np.asarray(r["P"]).reshape(-1)[-1]),
-        "smoothness": float(np.asarray(r["S"]).reshape(-1)[-1]),
-        "aspect": float(np.asarray(r["asp"]).reshape(-1)[-1]),
+        "C": _last(c["C"]),
+        "C_history": Ch,
+        "C_stoptime_swing_pct": (
+            None if _w is None else float(100 * (_w.max() - _w.min()) / _w.mean())
+        ),
+        "V": _last(c["V"]),
+        "M_nd": _last(c["mnd"]),
+        "perimeter": _last(c["P"]),
+        "smoothness": _last(c["S"]),
+        "aspect": _last(c["asp"]),
         "blank_volume_initial": float(v0.sum()),
         "blank_volume_final": float(vf.sum()),
         "material": float((rho * vf).sum()),
         "nodes_moved": int((d > 1e-12).sum()),
         "max_node_move": float(d.max()) if d.size else 0.0,
+        "bc_drift_changed": (
+            int(np.asarray(r["bc_drift"]).reshape(-1)[2]) if "bc_drift" in r.files else None
+        ),
     }
     # --- the quiet failures -------------------------------------------------------------------
     warn = []
@@ -92,6 +132,21 @@ def design(tag):
     # 3. Supports drifted. bracket.py prints this itself; carry it into the report.
     if "WARNING: the clamped set drifted" in txt:
         warn.append("clamped support set drifted -- reported compliance is not the saved mesh's")
+    # 3b. The same fault, from the npz rather than the log. `lbracket3d.py` stamps `bc_drift` into
+    #     every checkpoint and then refuses; the design survives, flagged, so the report has to be
+    #     the thing that says so -- a stamped-but-unread design is exactly as misleading as an
+    #     unstamped one. Absent on designs written before the stamp existed, which is why this is
+    #     `is not None` rather than truthiness.
+    if out.get("bc_drift_changed") is not None and out["bc_drift_changed"] > 0:
+        warn.append(
+            f"{out['bc_drift_changed']} boundary node(s) entered or left a BC zone -- the supports "
+            f"no longer describe the geometry their predicate names")
+    # 3c. The reported compliance depends on where the run stopped. Under ~5 % this is an error
+    #     bar; above it, the last iterate is not a result and any ratio built on it inherits that.
+    if out.get("C_stoptime_swing_pct") is not None and out["C_stoptime_swing_pct"] > 5.0:
+        warn.append(
+            f"C swings {out['C_stoptime_swing_pct']:.1f} % over the last frames -- the run is not "
+            f"converged and its reported compliance is wherever it happened to stop")
     # 4. A boundary condition sat on movable nodes (jNO's own guard).
     if "anchored to nodes that Variable.trainable()" in txt:
         warn.append("jNO: a boundary condition is anchored to movable nodes")
@@ -101,14 +156,40 @@ def design(tag):
     return out
 
 
+def _rean_logs(tag):
+    """Every reanalysis log for this tag, oldest first.
+
+    The naming diverged: the cluster job writes `reb_<tag>.log`, the deeper hand-run series were
+    written as `rean_<tag>_L3fix.log`, and the per-level cluster runs will be `reb_<tag>_L<k>.log`.
+    Reading only `reb_<tag>.log` silently reported the SHALLOWEST series available -- measured on
+    `hv_Lagrange`, that is a bound of 27.87 where the level-3 series says 111.64, a 4x
+    under-report of this repo's headline number, with no warning. Take them all and merge by level.
+    """
+    pats = (f"reb_{tag}.log", f"reb_{tag}_L*.log", f"rean_{tag}.log", f"rean_{tag}_*.log")
+    seen = []
+    for pat in pats:
+        for f in sorted(glob.glob(os.path.join(OUT, pat))):
+            if f not in seen:
+                seen.append(f)
+    return seen
+
+
 def reanalysis(tag):
-    """The boundary reanalysis, if it ran."""
-    p = os.path.join(OUT, f"reb_{tag}.log")
-    if not os.path.exists(p):
+    """The boundary reanalysis, if it ran. Merges every log for the tag, deepest level winning."""
+    logs = _rean_logs(tag)
+    if not logs:
         return {"status": "not run"}
-    txt = open(p, encoding="utf-8", errors="replace").read()
-    lv = re.findall(r"level (\d) \(h=([\d.]+),\s+(\d+) tets\): C =\s+([\d.]+)", txt)
+    txt = "\n".join(open(f, encoding="utf-8", errors="replace").read() for f in logs)
+    # Levels merge by k across logs; a later log's level k replaces an earlier one's, so a rerun at
+    # a deeper level supersedes rather than duplicates.
+    lv_by_k = {}
+    for f in logs:
+        t = open(f, encoding="utf-8", errors="replace").read()
+        for a, b, c, x in re.findall(r"level (\d) \(h=([\d.]+),\s+(\d+) tets\): C =\s+([\d.]+)", t):
+            lv_by_k[int(a)] = {"k": int(a), "h": float(b), "tets": int(c), "C": float(x)}
+    lv = [lv_by_k[k] for k in sorted(lv_by_k)]
     out = {
+        "logs": [os.path.basename(f) for f in logs],
         "status": "ok" if lv else "INCOMPLETE",
         "C_design_P1": _grab(txt, r"design, SIMP field, design mesh\s+C =\s+([\d.]+)"),
         "C_kept": _grab(txt, r"extracted solid, the SAME tets\s+C =\s+([\d.]+)"),
@@ -118,7 +199,7 @@ def reanalysis(tag):
         "iso_level": _grab(txt, r"volume-preserving level rho > ([\d.]+)"),
         "surface_triangles": _grab(txt, r"extracted surface: (\d+) triangles", int),
         "interior_node_pct": _grab(txt, r"interior \(([\d.]+) ?%\)"),
-        "levels": [{"k": int(a), "h": float(b), "tets": int(c), "C": float(x)} for a, b, c, x in lv],
+        "levels": lv,
     }
     if lv:
         Cs = [x["C"] for x in out["levels"]]

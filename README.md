@@ -265,28 +265,68 @@ in doubt — E-FEM on the coarse deformable mesh is the only run whose reported 
 contact with its own geometry, and it gets there with a single connected component and 2.5x fewer
 dofs than the fine fixed mesh — but a matched-level comparison needs the cluster.
 
-## Validation: the paper's own 2-D cantilever
+## Validation: the paper's own 2-D benchmarks
 
-Everything else here extends the method to 3-D. `scripts/cantilever2d.py` checks that the
-implementation reproduces the method it extends, which nothing did before: `runs/p2d*` is a
-pseudo-2-D SLAB run of the 3-D code with its element-volume constraint violated throughout, i.e. a
-smoke test wearing a validation's clothes.
+Everything else here extends the method to 3-D. `scripts/paper2d.py` checks that the implementation
+reproduces the method it extends, which nothing did before: `runs/p2d*` is a pseudo-2-D SLAB run of
+the 3-D code with its element-volume constraint violated throughout, i.e. a smoke test wearing a
+validation's clothes. It runs both of their 2-D problems -- `PROBLEM=cantilever` (their Fig. 5/7)
+and `PROBLEM=lbracket` (their Fig. 9).
 
-A genuine 2-D plane-stress run on triangles, their Section 3 constants, against their Fig. 5/7:
+**WITHDRAWN: an earlier version of this section reported E-FEM agreeing with their 80.809 to
++0.03 % and -0.14 %.** That was real arithmetic on an unmeasured quantity. Compliance scales as the
+square of the applied load, the paper never states its load, and the script was leaving the
+coefficient at `1/SPAN`, which happened to assemble |F| = 0.9153. Measured on the same design at
+the same settings:
+
+    |F| = 0.9153   C = 80.667      |F| = 1.0   C = 95.643
+
+The ratio is the load ratio squared. So **absolute compliance against this paper is indeterminate**,
+and the agreement was an accidental coefficient landing near their unknown value.
+
+### What does not depend on the load
 
 | | theirs | ours | |
 |---|---|---|---|
-| elements | 4,108 | 4,226 | gmsh, same target edge |
-| dofs, E-FEM | 12,870 = 2,145 x 2 x **3** | 13,224 = 2,204 x 2 x **3** | **exact structural match** |
-| compliance, **E-FEM** | 80.809 | 80.830 at penal 3 | **+0.03 %** |
-| compliance, E-FEM (independent run) | 80.809 | 80.698 | **-0.14 %** |
-| compliance, conventional | 75.965 | window mean 86.6-92.8 | +14 % to +22 %, **oscillating** |
-| volume fraction | 0.400 | 0.3985 / 0.3933 | |
+| elements, cantilever | 4,108 | 4,226 | gmsh, same target edge |
+| elements, L-bracket | 2,320 | 2,422 | ditto |
+| **dofs, E-FEM** | 12,870 = 2,145 x 2 x **3** | 13,224 = 2,204 x 2 x **3** | **exact structural match** |
 
 **The dof count is the sharpest check and it is exact.** First-order interpolation cover carries
 1 + dim slots per node per component -- 3 in 2-D against the 4 the 3-D runs here use -- so the
-enrichment is structurally theirs, established independently of any physics. On top of that,
-E-FEM's compliance lands within 0.15 % in two independent runs.
+enrichment is structurally theirs, established independently of any physics.
+
+The other load-free result is a behaviour, not a number: **the conventional arm does not converge**.
+It swings 24-50 % over its last 200 iterations, so its apparent agreement depends entirely on where
+the run stops (halting at iteration 400 gives +1.8 %, the window mean +14 %). E-FEM on identical
+mesh, optimiser and settings swings 3 %. That is the paper's own claim arriving as instability
+rather than as a wrong number, and they do not report it.
+
+### The load is one scalar, so it can be calibrated once and tested twice
+
+The paper never prints its load, but the same load serves both its 2-D benchmarks. Calibrating it
+on the cantilever to reproduce their 80.809 gives |F| = 0.9161; using that value unchanged to
+**predict** the L-bracket:
+
+| | at the calibrated load | paper | |
+|---|---|---|---|
+| cantilever (**fitted**) | 82.06 | 80.809 | +1.6 % |
+| L-bracket (**predicted**) | 195.11 | 220.578 | **-11.6 %** |
+
+One parameter fitted on one observation, tested against a second, independent one. -11.6 % is much
+better than chance and supports the single-unstated-load reading, but it is **not** a verification
+to a few percent: the L-bracket arm converges to a 2.3 % band, so the residual is real and
+unattributed. Two candidate explanations were tested and both eliminated -- `PSTAR` across a 2.6x
+range (650 to 250) moves it under 1 %, and restoring the passive region moves it 0.6 %. What remains
+is the grey-vs-binary mismatch below, or a geometry/BC detail not resolvable from their figure.
+
+**A bug this cross-check found, worth its own line because it was live on both benchmarks.** The
+non-design solid region under the load was EMPTY. The tip predicate had been made a boundary edge
+(which is what makes the load an integral of the right magnitude) and `pmask` reused it on cell
+CENTROIDS -- and no centroid lies on an edge. jNO's own tutorial says what that costs: "the
+optimiser empties the loaded elements and the compliance then measures that artefact rather than
+the structure." The passive region now has its own AREA predicate per problem and the run refuses
+to start if it catches no cells.
 
 **The conventional arm does not converge, and that is the interesting half.** It swings 24-50 %
 over its last 200 iterations, so its apparent agreement depends entirely on where the run stops:
@@ -333,6 +373,14 @@ Reanalysed at level 2, with the perimeter barrier active (see below for why that
 | conventional (Lagrange) | 214.4373 | **≥ 34121.49** | **≥ 15812 %** |
 | **E-FEM** (`SPACE=cover`) | 328.0333 | **≥ 866.32** | **≥ 164 %** |
 
+**These two ran 250 iterations against the rope bracket's 750, and it shows.** Their reported
+compliances still move: over the last 8 chunks the conventional arm swings **15.2 %** and E-FEM
+**7.8 %**, against 2.4 % / 1.1 % for the bracket pair. Propagated onto the ratio below that is
+±22 on the L-bracket against ±3.1 on the bracket, so the two are consistent but the L-bracket's
+number alone cannot distinguish 74x from 118x. Re-run at 750 the conventional arm's swing drops to
+**0.96 %** (C = 218.64), so this is under-convergence, not instability -- it wants redoing at 750
+for both arms before either figure is quoted as final.
+
 **The formulation gap reproduces at the same magnitude as the rope bracket.** There it was ≥ 28.7 %
 against ≥ 2570 %, a 90x difference in fidelity; here ≥ 164 % against ≥ 15812 %, a 96x difference.
 Two unrelated geometries, two loads, the same ratio. The step decomposition says why: the
@@ -367,6 +415,25 @@ number that matters is the narrowest cross-section on the load path, and it has 
 disagree: as designed (rho > 0.5) and after the manifold repair the extraction must perform. The
 E-FEM design at `PSTAR=0` reads 3 tets as designed and **1 after repair**. Report both; the repaired
 one is the stricter and the one that decides whether a body can be built.
+
+## How much does a reported compliance depend on where the run stopped?
+
+Enough to matter in 2-D, and not in 3-D -- which is worth stating because every ratio in this
+README is built on reported compliances, and the 2-D conventional arm shows what it looks like when
+that foundation is soft. Measured as the spread of `C` over each run's last 8 recorded chunks:
+
+| run | swing |
+|---|---|
+| bracket, E-FEM | 1.07 % |
+| bracket, conventional | 2.43 % |
+| h=0.10 fixed, conventional | 1.42 % |
+| h=0.10 deformable, conventional | 4.04 % |
+| **2-D cantilever, conventional** | **24-50 %** |
+
+So the 3-D reported numbers are not artefacts of the stopping iteration, and the 2-D conventional
+one is. `scripts/cluster_report.py` computes this per design and warns above 5 %, so it cannot be
+forgotten; it is also the error bar every derived ratio should carry
+(`dR/R = dC_L/C_L + dC_E/C_E`).
 
 ## Run it
 
